@@ -1,0 +1,144 @@
+# lite_move_controller 配置模板
+#
+# ⚠️ 本文件是**模板/参考**。真正生效的是 launch 传进去的参数
+#    （`ros2 launch lite_move_controller move_controller.launch.py`），
+#    因为 canonical_joints / joints_left / joints_right 必须与
+#    `lite_bringup` 的 arm_joints（= 驱动的关节集合）**逐字一致且顺序一致**，
+#    否则桥的完整性校验（I5）会**整帧拒绝**，症状是"日志正常、电机不动"。
+#
+# ⚠️ 严禁修改：lite_driver / lite_description / lite_calibration /
+#    lite_bridge / lite_controller / robstride_msgs。
+
+lite_move_controller:
+  ros__parameters:
+    # --- 身份与通路 ---------------------------------------------------------
+    # ⚠️ 必须出现在 lite_bringup 的 source_names 里，否则所有命令被丢弃并打
+    #    "丢弃未知数据源 'lite_move_controller'"（实测踩过）。
+    source_name: "lite_move_controller"
+    command_topic: "/lite_bridge/motion_command"
+    # ⚠️ 用 /joint_states（14 个臂关节）—— 不是 /lite_js/joint_states（16 个，
+    #    含无人发布的夹爪）。本层只需臂关节；多出来的夹爪对本层无意义。
+    joint_states_topic: "/joint_states"
+
+    # --- 关节（必须与桥逐字一致；通常由 launch 注入）------------------------
+    canonical_joints: []      # launch 注入（14 个）
+    arm_names: ["left", "right"]
+    joints_left: []           # launch 注入（7 个）
+    joints_right: []          # launch 注入（7 个）
+    root_link: "world_root"
+    frame_id: "world_root"
+    tip_link_left: "left_gripper_tip_middle_link"
+    tip_link_right: "right_gripper_tip_middle_link"
+
+    # --- 夹爪（prismatic 阻抗夹持，可选）--------------------------------------
+    # 用户场景：夹爪夹着一支笔，对**期望位置 0**（= 完全夹到底）做阻抗控制，
+    # 然后手臂去画圆（手臂的 IK 链只有 7 个 revolute，**不含夹爪**）。
+    #
+    # ⚠️ 只有 canonical 里**真的有**这些关节才生效（bringup 的
+    #    mode:=arms_grippers，16 关节）；14 关节模式下整段跳过、旧行为不变。
+    # ⚠️ 单位是 **prismatic** 的：m / m·s⁻¹ / N / N·m⁻¹ / N·s·m⁻¹（不是 rad！）。
+    # ⚠️ 夹持力上限不是 kp，而是 limit_guard 的 torque_max ＝
+    #    min(配置, URDF effort=1 N) ⇒ 本机是"轻夹 1 N"。
+    gripper_joints: ["left_gripper", "right_gripper"]
+    gripper_position: 0.0       # m；0 = 完全夹到底（URDF 限位 [0, 0.047]）
+    gripper_kp: 20.0            # N/m（很软的一档；200 实测偏硬）
+    gripper_kd: 3.0             # N·s/m
+
+    # --- 模型与参数来源 -----------------------------------------------------
+    # 空 = 用 /robot_description（robot_state_publisher 发，transient_local）
+    # ⚠️ 空值时节点会在 initialize() 里用**临时 executor 抽拍等**它最多 2.5 s
+    #    （transient_local 的历史消息只有在 spin 时才会投递 —— 这也是旧版
+    #    "构造完还没 spin 就去读，永远拿到空串 ⇒ arms=0" 那个 bug 的根因）。
+    # ⚠️ 等不到 ⇒ FATAL + 退出（fail-closed），不会带着 arms=0 假装启动成功。
+    # ⚠️ 给了路径就**只**读文件（话题消息被忽略），并在启动日志/~/get_status
+    #    里报告来源与字节数。
+    urdf_path: ""
+    # 空 = 使用 lite_ik_node 包内的运动学配置。
+    kinematics_yaml: ""
+    # --- IK 后端选择 --------------------------------------------------------
+    # 默认 pick_ik（MoveIt 的 kinematics 插件，对 7 轴冗余臂/贴限位的解比 KDL 稳）；
+    # 空串 = **明确**只用内置 KDL 后端（不打 WARN）。
+    # 可切：trac_ik_kinematics_plugin/TRAC_IKKinematicsPlugin
+    # ⚠️ 插件没装 / SRDF 找不到 / RobotModel 建不起来 ⇒ **回退 KDL 并打 WARN**，
+    #    节点不会起不来；但那种情况下其实就是改造前的行为，务必看启动日志。
+    # ⚠️ 点号是**故意**的（嵌套参数名，与 MoveIt 的 `robot_description_kinematics.*`
+    #    风格一致）：下面这两行等价于参数 `ik.solver_plugin`。
+    ik:
+      solver_plugin: "pick_ik/PickIkPlugin"
+      # 插件单次求解超时上限（秒）；<=0 = 不设限（完全用 kinematics.yaml 的值）。
+      # ⚠️ 必须有上限：pick_ik 在目标不可达时会把超时用满，而失败路径一次
+      #    IkOrchestrator::solve() 会做十来次求解 —— 不夹时会到 413~430 ms，
+      #    超过桥的 command_timeout_ms(250) ⇒ 桥会判本层"死了"。
+      # ⚠️ 但太小也不行（真机实测）：0.02 时"抬起 10 cm"这种可达目标会被
+      #    pick_ik 判 FAILED（搜索来不及），0.05 才 SOLVED。取 0.05。
+      max_solver_timeout_sec: 0.05
+    # 空 = 使用 lite_ik_node 包内的 SRDF。
+    srdf_path: ""
+    # lite_dyid 的 params.json（动力学前馈）。默认使用包内随版本保存的辨识结果；
+    # 文件不存在时该臂前馈关闭并打 ERROR（不会静默用 0 或用旧参数）。
+    params_json: "config/dynamics/identified_params.json"
+
+    # --- 控制律（**启动期固定**，运行期不支持在线切换）---------------------
+    # regular / admittance / impedance
+    control_mode: "regular"
+    # ⚠️ **下发频率固定 100 Hz**（设计前提：上层 10/20 Hz 时我们仍以 100 Hz
+    #    下发柔顺曲线）。IK 慢不靠降频解决，靠下面的 ik_rate_hz 解耦。
+    control_rate_hz: 100.0
+    # **IK 重解节拍**（Hz）。只是"最早多久再解一次"的上限：IK 单次耗时不稳定
+    # （pick_ik 4~50 ms），插值按**墙钟时间**推进（三次 Hermite），早到提前切段、
+    # 晚到停在端点等 —— 不依赖"每 4 拍走 1/4"这种固定节拍。
+    ik_rate_hz: 25.0
+    # DWELL 状态的下发频率（以前这个参数只声明没使用，现在真的限频）
+    dwell_rate_hz: 20.0
+
+    # --- 超时链（启动期强校验，不满足拒绝启动）-----------------------------
+    #   tier_target (60) < tier_bridge (120) < command_timeout (250)
+    # ⚠️ 顺序反了会出现"本层还在发、桥已判我死"或"本层卡死但控制器还在用旧命令出力"。
+    tier_target_timeout_ms: 60.0
+    tier_bridge_timeout_ms: 120.0
+    command_timeout_ms: 250.0
+    target_timeout_ms: 200.0
+    state_timeout_ms: 100.0
+
+    # --- 平滑 ---------------------------------------------------------------
+    ramp_duration_sec: 0.5      # 激活斜坡（首帧 Kp=Kd=0 且位置=实测 ⇒ 力矩恒为 0）
+    max_joint_step_rad: 0.05    # 每拍下发位置的最大步长（安全网；正常由 Hermite 段决定）
+    max_command_lead_rad: 0.20  # 下发目标相对实测的最大超前（0=不限；防 MIT windup）
+    segment_max_ms: 120.0       # 单段 Hermite 的最长时间（IK 卡住时不让它无限延伸）
+    pose_lpf_hz: 15.0           # 上游位姿低通
+    velocity_lpf_hz: 25.0       # 重建速度的轻低通
+
+    # --- 启动自检 -----------------------------------------------------------
+    # 发现其他 move_controller_node 时：ask（有 TTY 才问，否则拒绝）/ kill / abort
+    duplicate_instance_policy: "ask"
+
+    # --- 控制律参数 ---------------------------------------------------------
+    stiffness_cart: [300.0, 300.0, 300.0, 8.0, 8.0, 8.0]     # N/m, N·m/rad
+    damping_cart: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]             # 全 0 = 按 ζ 自动推
+    damping_zeta: 0.9
+    admittance_mass: [1.0, 1.0, 1.0, 0.05, 0.05, 0.05]
+    admittance_stiffness: [100.0, 100.0, 100.0, 2.0, 2.0, 2.0]  # K_a：0 = 自由拖动
+    admittance_max_offset: [0.10, 0.10, 0.10, 0.30, 0.30, 0.30]
+    wrench_lpf_hz: 10.0
+
+    # --- 下发前的四道闸（**安全关键，务必逐关节给**）------------------------
+    # ⚠️ MIT 通路没有位置环兜底：驱动只把力矩夹到**型号峰值**
+    #    （rs-00 17 N·m，而本机额定只有 7 N·m）、Kp 夹到协议量程 500。
+    #    保守上限只能由上层给（见 lite_bridge/docs/桥层设计.md §7.1）。
+    #
+    # 本机来自 lite_controller/config/gravity/joint_spec.yaml 的 max_safe_torque：
+    # 约定 0.0（= 未配置，用 URDF 限位）。要收紧就按 canonical 顺序逐关节给。
+    torque_limit: [-1.0]        # 哨兵：未配置 ⇒ 用 URDF/默认
+    position_min: [-1.0]
+    position_max: [-1.0]
+    velocity_limit: [-1.0]
+    # Kp/Kd 上限：**必须给**，不能退回协议量程 500
+    stiffness_limit: [-1.0]
+    damping_limit: [-1.0]
+    default_stiffness: 20.0
+    default_damping: 1.0
+
+    # --- 启动行为 -----------------------------------------------------------
+    # true = 起节点后自动 enable（调试用；真机建议 false，人工确认后再 enable）
+    auto_enable: false
+    lock_hold_ms: 0.0           # LOCK 模式不限时（0 == 无限期）

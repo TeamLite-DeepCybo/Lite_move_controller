@@ -1,0 +1,31 @@
+# 阻抗模式 200 s 真机测试参数（2026-10-20 用户指定：惯性稍大、阻尼稍大、刚度下降）。
+#
+# 用法（覆盖包内默认参数，只列与默认不同的项）：
+#   ros2 launch lite_move_controller move_controller.launch.py \
+#       mode:=impedance \
+#       params_file:=$(ros2 pkg prefix lite_move_controller)/share/lite_move_controller/config/impedance_test_200s.yaml
+#
+# 设计口径：
+#   · 刚度：300/8  → 150/4（约 -50%，更柔顺）
+#   · 惯性：Λ 1.0/0.05 → 2.0/0.10（阻抗的阻尼推导用它，"稍大"）
+#   · 阻尼：damping_cart 留空 ⇒ D = 2ζ√(K·Λ)；ζ 0.9 → 1.3（"稍大"）
+#   · 前馈：默认开，用 /tmp 下那次辨识（static_friction_only）
+lite_move_controller:
+  ros__parameters:
+    control_mode: impedance
+    stiffness_cart: [350.0, 350.0, 350.0, 4.0, 4.0, 4.0]     # N/m, N·m/rad
+    damping_cart: [0.8, 0.8, 0.8, 0.8, 0.8, 0.8]             # 0 = 按 ζ/Λ 推
+    damping_zeta: 1.3
+    admittance_mass: [2.0, 2.0, 2.0, 0.10, 0.10, 0.10]       # 兼作阻抗有效惯量 Λ
+    params_json: "config/dynamics/identified_params.json"
+    emit_dynamics_feedforward: true
+    control_rate_hz: 100.0
+    ik_rate_hz: 75.0
+    segment_max_ms: 120.0
+    max_command_lead_rad: 0.20
+    # 前馈力矩上限（逐关节，canonical 顺序）。
+    # ⚠️ 默认 5 N·m 会把肩部前馈**夹住**（实测右肩 roll 稳态偏差 0.14 rad）：
+    #    本机 shoulder/elbow 的峰值是 14 N·m（肩 pitch 17、腕 4），这里给
+    #    14/14/14/14 + 4/4/4 —— 只是**上限**，实际力矩仍由 g(q)+摩擦决定。
+    torque_limit: [14.0, 14.0, 14.0, 14.0, 4.0, 4.0, 4.0,
+                   14.0, 14.0, 14.0, 14.0, 4.0, 4.0, 4.0]

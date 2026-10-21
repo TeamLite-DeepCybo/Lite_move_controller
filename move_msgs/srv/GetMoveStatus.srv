@@ -1,0 +1,21 @@
+# GetMoveStatus —— 全景回读（与 MoveStatus 话题同一份数据）
+#
+# ⚠️ 为什么既有话题又有服务：话题是给"持续观察"用的（20 Hz），
+#    服务是给"我现在就要一个确定答案"用的（脚本/人工排查）。
+#    两者**必须同源**，否则会出现"话题说在跑、服务说没跑"这种最难查的分歧。
+#
+# 语义：**绝不乐观上报** —— 所有字段取自实际状态（含桥的回读），
+# 而不是"我们请求过什么"。
+bool verbose
+
+---
+bool ok
+string message
+
+# 完整状态（与 MoveStatus 话题内容一致）
+move_msgs/MoveStatus status
+
+# 便于人工排查的补充项（verbose=true 时有值）
+string[] loaded_arms
+string ik_backend          # 例如 "kdl_kinematics_plugin/KDLKinematicsPlugin"
+string dynamics_params_path

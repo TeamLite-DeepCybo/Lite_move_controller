@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>move_msgs</name>
+  <version>0.1.0</version>
+  <description>
+    运控层（lite_move_controller）与上游数据源之间的**消息契约**。
+
+    ⚠️ 本包与 robstride_msgs **刻意解耦**，两者的分工是：
+      · move_msgs      —— "运控层 ↔ 上游"的契约：终端位姿、状态反馈、可达性查询
+      · robstride_msgs —— "运控层 ↔ 桥 ↔ 控制器 ↔ 驱动"的契约：电机命令与状态
+
+    分层的理由是**一层对一层负责**：终端位姿与 Allen 键无关，电机帧与 IK 无关。
+    把两者塞进同一个包，任何一侧的改动都会牵动另一侧的构建与版本。
+
+    ⚠️ 本包**不依赖** robstride_msgs（反之亦然），只依赖 ROS 标准消息包。
+    运控层同时依赖两者，并在内部做单向转换：
+        move_msgs/MoveTarget  ──▶（IK + 控制律）──▶  robstride_msgs/MotionCommand
+  </description>
+  <maintainer email="marki@example.com">marki</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <!-- 只依赖 ROS 标准消息包：与本工作区的任何私有包解耦 -->
+  <depend>builtin_interfaces</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

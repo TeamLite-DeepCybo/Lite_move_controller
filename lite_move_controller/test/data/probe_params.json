@@ -1,0 +1,1041 @@
+{
+  "schema": 2,
+  "source": {
+    "package": "lite_dyid",
+    "model": "static_friction_only",
+    "model_desc": "静态+摩擦（**惯量张量全部置 0**；质量与一阶矩来自静态辨识）",
+    "generated": "2026-10-16T11:20:41+00:00"
+  },
+  "robot": {
+    "urdf_sha256": "0d77e4cd7f11ba6fbfe5df9c1dc74f6137c389f70d25ff3fc51d1a0cc65bf946",
+    "joints": [
+      "left_shoulder_pitch",
+      "left_shoulder_roll",
+      "left_shoulder_yaw",
+      "left_elbow_pitch",
+      "left_wrist_yaw",
+      "left_wrist_roll",
+      "left_wrist_pitch",
+      "right_shoulder_pitch",
+      "right_shoulder_roll",
+      "right_shoulder_yaw",
+      "right_elbow_pitch",
+      "right_wrist_yaw",
+      "right_wrist_roll",
+      "right_wrist_pitch"
+    ],
+    "links": [
+      "left_shoulder_pitch_link",
+      "left_shoulder_roll_link",
+      "left_shoulder_yaw_link",
+      "left_elbow_pitch_link",
+      "left_wrist_yaw_motor_link",
+      "left_wrist_roll_link",
+      "left_wrist_pitch_link",
+      "left_gripper_finger_left_link",
+      "left_gripper_finger_right_link",
+      "right_shoulder_pitch_link",
+      "right_shoulder_roll_link",
+      "right_shoulder_yaw_link",
+      "right_elbow_pitch_link",
+      "right_wrist_yaw_motor_link",
+      "right_wrist_roll_motor_link",
+      "right_wrist_pitch_link",
+      "right_gripper_finger_left_link",
+      "right_gripper_finger_right_link"
+    ]
+  },
+  "inertia": {
+    "mode": "static_friction_only",
+    "mode_desc": "静态+摩擦（**惯量张量全部置 0**；质量与一阶矩来自静态辨识）",
+    "usable_for_mass_matrix": false,
+    "note": "惯量张量已置 0（未辨识）；质量与一阶矩保留，g(q) 仍然准确",
+    "links": {
+      "left_shoulder_pitch_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 1.2,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "left_shoulder_roll_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 1.09,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "left_shoulder_yaw_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 1.06,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "left_elbow_pitch_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 0.61,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "left_wrist_yaw_motor_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 0.4,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "left_wrist_roll_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 0.52,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "left_wrist_pitch_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 0.83,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "left_gripper_finger_left_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 0.3,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "left_gripper_finger_right_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 0.3,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "right_shoulder_pitch_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 1.2,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "right_shoulder_roll_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 1.09,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "right_shoulder_yaw_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 1.06,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "right_elbow_pitch_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 0.61,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "right_wrist_yaw_motor_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 0.4,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "right_wrist_roll_motor_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 0.52,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "right_wrist_pitch_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 0.83,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "right_gripper_finger_left_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 0.3,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      },
+      "right_gripper_finger_right_link": {
+        "identified": [
+          "mass",
+          "mx",
+          "my",
+          "mz"
+        ],
+        "mass": 0.3,
+        "com": [
+          0.02,
+          0.03,
+          0.06
+        ],
+        "I": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.0,
+            0.0
+          ]
+        ]
+      }
+    }
+  },
+  "joints": [
+    "left_shoulder_pitch",
+    "left_shoulder_roll",
+    "left_shoulder_yaw",
+    "left_elbow_pitch",
+    "left_wrist_yaw",
+    "left_wrist_roll",
+    "left_wrist_pitch",
+    "right_shoulder_pitch",
+    "right_shoulder_roll",
+    "right_shoulder_yaw",
+    "right_elbow_pitch",
+    "right_wrist_yaw",
+    "right_wrist_roll",
+    "right_wrist_pitch"
+  ],
+  "links": [
+    "left_shoulder_pitch_link",
+    "left_shoulder_roll_link",
+    "left_shoulder_yaw_link",
+    "left_elbow_pitch_link",
+    "left_wrist_yaw_motor_link",
+    "left_wrist_roll_link",
+    "left_wrist_pitch_link",
+    "left_gripper_finger_left_link",
+    "left_gripper_finger_right_link",
+    "right_shoulder_pitch_link",
+    "right_shoulder_roll_link",
+    "right_shoulder_yaw_link",
+    "right_elbow_pitch_link",
+    "right_wrist_yaw_motor_link",
+    "right_wrist_roll_motor_link",
+    "right_wrist_pitch_link",
+    "right_gripper_finger_left_link",
+    "right_gripper_finger_right_link"
+  ],
+  "gravity": {
+    "params": [
+      1.2,
+      0.024,
+      0.036,
+      0.072,
+      1.09,
+      0.021800000000000003,
+      0.0327,
+      0.0654,
+      1.06,
+      0.0212,
+      0.0318,
+      0.0636,
+      0.61,
+      0.0122,
+      0.0183,
+      0.0366,
+      0.4,
+      0.008,
+      0.012,
+      0.024,
+      0.52,
+      0.010400000000000001,
+      0.0156,
+      0.0312,
+      0.83,
+      0.0166,
+      0.0249,
+      0.0498,
+      0.3,
+      0.006,
+      0.009,
+      0.018,
+      0.3,
+      0.006,
+      0.009,
+      0.018,
+      1.2,
+      0.024,
+      0.036,
+      0.072,
+      1.09,
+      0.021800000000000003,
+      0.0327,
+      0.0654,
+      1.06,
+      0.0212,
+      0.0318,
+      0.0636,
+      0.61,
+      0.0122,
+      0.0183,
+      0.0366,
+      0.4,
+      0.008,
+      0.012,
+      0.024,
+      0.52,
+      0.010400000000000001,
+      0.0156,
+      0.0312,
+      0.83,
+      0.0166,
+      0.0249,
+      0.0498,
+      0.3,
+      0.006,
+      0.009,
+      0.018,
+      0.3,
+      0.006,
+      0.009,
+      0.018
+    ],
+    "masses": [
+      1.2,
+      1.09,
+      1.06,
+      0.61,
+      0.4,
+      0.52,
+      0.83,
+      0.3,
+      0.3,
+      1.2,
+      1.09,
+      1.06,
+      0.61,
+      0.4,
+      0.52,
+      0.83,
+      0.3,
+      0.3
+    ],
+    "coms": [
+      [
+        0.02,
+        0.03,
+        0.06
+      ],
+      [
+        0.02,
+        0.03,
+        0.06
+      ],
+      [
+        0.02,
+        0.03,
+        0.06
+      ],
+      [
+        0.02,
+        0.03,
+        0.06
+      ],
+      [
+        0.02,
+        0.03,
+        0.06
+      ],
+      [
+        0.02,
+        0.03,
+        0.06
+      ],
+      [
+        0.02,
+        0.03,
+        0.06
+      ],
+      [
+        0.02,
+        0.03,
+        0.06
+      ],
+      [
+        0.02,
+        0.03,
+        0.06
+      ],
+      [
+        0.02,
+        0.03,
+        0.06
+      ],
+      [
+        0.02,
+        0.03,
+        0.06
+      ],
+      [
+        0.02,
+        0.03,
+        0.06
+      ],
+      [
+        0.02,
+        0.03,
+        0.06
+      ],
+      [
+        0.02,
+        0.03,
+        0.06
+      ],
+      [
+        0.02,
+        0.03,
+        0.06
+      ],
+      [
+        0.02,
+        0.03,
+        0.06
+      ],
+      [
+        0.02,
+        0.03,
+        0.06
+      ],
+      [
+        0.02,
+        0.03,
+        0.06
+      ]
+    ],
+    "nominal_masses": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "nominal_coms": [
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ]
+    ],
+    "rank": 36,
+    "cond": 10.0
+  },
+  "friction": {
+    "c1_pos": [
+      0.05,
+      0.05,
+      0.05,
+      0.05,
+      0.05,
+      0.05,
+      0.05,
+      0.05,
+      0.05,
+      0.05,
+      0.05,
+      0.05,
+      0.05,
+      0.05
+    ],
+    "c1_neg": [
+      -0.05,
+      -0.05,
+      -0.05,
+      -0.05,
+      -0.05,
+      -0.05,
+      -0.05,
+      -0.05,
+      -0.05,
+      -0.05,
+      -0.05,
+      -0.05,
+      -0.05,
+      -0.05
+    ],
+    "c2": [
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.1,
+      0.1
+    ]
+  },
+  "fit": {
+    "gravity_rms_joint": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "friction_rms_joint": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "scale_check": 1.0
+  },
+  "meta": {
+    "note": "测试探针：质量/质心为物理可信的构造值，非真实辨识结果",
+    "model": "static_friction_only"
+  }
+}

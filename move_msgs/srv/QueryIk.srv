@@ -1,0 +1,49 @@
+# QueryIk —— 单点位姿**可达性预查**（不动机器人）
+#
+# ===========================================================================
+# 用途：上游在"决定要不要发这个目标"之前先问一次
+# ===========================================================================
+#
+# 典型场景：
+#   · 视觉伺服算出候选位姿，先问"这个点能不能到"，不能到就不发；
+#   · 在线规划搜到一串候选点，先筛掉不可达的，避免运控层反复给残差解；
+#   · 人工排查："为什么我发的点它只走到那儿" → 用同一个点问一次，
+#     看 residual_* 与 saturated_joints，一眼就知道是超工作空间还是撞限位。
+#
+# ⚠️ 本服务**只解算、不下发、不改状态**（纯查询）。要在真机上动，请发 MoveTarget。
+#
+# ⚠️ 用哪个初值（seed）会影响数值求解器的结果（7 自由度冗余臂尤其明显）：
+#    `seed_joints` 为空 ⇒ 用"当前实测关节角"当种子（最贴近现实）；
+#    给了就必须长度正确且有限。
+std_msgs/Header header
+
+# 查询哪条臂（"left" / "right"）；空 = 用第一条已加载的臂
+string arm
+string frame_id
+
+geometry_msgs/Point position
+geometry_msgs/Quaternion orientation
+
+# 可选种子关节角（rad）。空 = 用当前实测
+float64[] seed_joints
+
+# 是否额外回传关节解
+bool want_joints
+
+---
+bool ok
+string message
+
+# 0=OK 精确可达，1=RESIDUAL 只有残差解，2=LIMIT_CLAMPED 会被限位裁剪，
+# 3=FAILED 无解（与 MoveStatus.ik_status 同一套取值）
+uint8 ik_status
+string ik_status_name
+
+geometry_msgs/Point position_residual
+geometry_msgs/Vector3 orientation_residual
+float64 position_residual_norm
+float64 orientation_residual_norm
+string[] saturated_joints
+
+# want_joints=true 时有值
+float64[] joints

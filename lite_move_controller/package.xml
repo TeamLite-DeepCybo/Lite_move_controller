@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>lite_move_controller</name>
+  <version>0.1.0</version>
+  <description>
+    Lite 双臂运动控制器：使用 lite_ik_node 的运动学结果和 lite_dyid 的
+    动力学参数，生成发往 lite_bridge 的平滑 MIT 关节命令。
+  </description>
+  <maintainer email="marki@example.com">marki</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- ROS 基础 -->
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>eigen</depend>
+  <depend>yaml-cpp</depend>
+
+  <!-- 消息契约：向上用 move_msgs，向下用 robstride_msgs（两层刻意解耦） -->
+  <depend>move_msgs</depend>
+  <depend>robstride_msgs</depend>
+  <depend>lite_ik_node</depend>
+  <exec_depend>lite_dyid</exec_depend>
+
+  <exec_depend>lite_description</exec_depend>
+  <depend>urdf</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

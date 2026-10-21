@@ -1721,7 +1721,7 @@ private:
     in.clear_fault_requested = clear_fault_requested_;
     in.state_fresh = bridge_ && bridge_->stateReady() && state_age_ms >= 0 &&
                      state_age_ms <= static_cast<std::int64_t>(state_timeout_ms_);
-    in.target_fresh = anyTargetFresh(now);
+    in.target_fresh = anyTargetFresh(now_fresh);
     // ⚠️⚠️ 授权判据**不能只看 `active_source`**。
     //
     // 桥侧 `activeSource()` 只在 `active_index_ >= 0` 时非空，而
@@ -1747,7 +1747,7 @@ private:
                            "stateReady=%d、目标年龄 %lld ms（阈值 %.0f ms）",
                            static_cast<long long>(state_age_ms), state_timeout_ms_,
                            static_cast<int>(bridge_ != nullptr && bridge_->stateReady()),
-                           static_cast<long long>(maxTargetAgeMs(now)), target_timeout_ms_);
+                           static_cast<long long>(maxTargetAgeMs(now_fresh)), target_timeout_ms_);
     }
     const bool was_disable = static_cast<bool>(disable_requested_);
     const StateActions act = sm_.tick(in);

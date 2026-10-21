@@ -106,7 +106,7 @@ ros2 service call /lite_move_controller/enable std_srvs/srv/Trigger "{}"
 圆形/方形示范脚本：
 
 ```bash
-python3 src/lite_move_controller/scripts/run_circle_square.py --help
+python3 src/Lite_move_controller/lite_move_controller/scripts/run_circle_square.py --help
 ```
 
 ## 动力学辨识参数

@@ -26,6 +26,10 @@ git clone https://github.com/TeamLite-DeepCybo/Lite_IK_node.git
 git clone https://github.com/TeamLite-DeepCybo/lite_dyid.git
 
 cd ..
+# ⚠️ 编译注意：必须使用系统 Python 环境编译，严禁在 Anaconda 环境下编译！
+# 若处于 (base) 环境请先执行: conda deactivate
+# 否则 Anaconda 的 yaml-cpp 0.9 会污染构建，导致运行时报 libyaml-cpp.so.0.9 找不到的致命错误。
+conda deactivate 2>/dev/null || true
 source /opt/ros/jazzy/setup.bash
 colcon build --packages-up-to lite_move_controller
 source install/setup.bash

@@ -36,6 +36,10 @@ string message
 
 # 0=OK 精确可达，1=RESIDUAL 只有残差解，2=LIMIT_CLAMPED 会被限位裁剪，
 # 3=FAILED 无解（与 MoveStatus.ik_status 同一套取值）
+uint8 EXACT = 0
+uint8 RESIDUAL = 1
+uint8 LIMIT_CLAMPED = 2
+uint8 FAILED = 3
 uint8 ik_status
 string ik_status_name
 
@@ -47,3 +51,5 @@ string[] saturated_joints
 
 # want_joints=true 时有值
 float64[] joints
+
+string model_sha256

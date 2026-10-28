@@ -1,0 +1,10 @@
+# Read-only FK using the same model/base/TCP as IK. SI, canonical arm order.
+string arm
+float64[] joints
+---
+bool ok
+string message
+string[] joint_names
+geometry_msgs/PoseStamped pose
+
+string model_sha256

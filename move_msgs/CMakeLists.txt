@@ -37,6 +37,8 @@ find_package(geometry_msgs REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   # --- 上游 → 运控层：终端目标（流式）---
+  "msg/ControlBatch.msg"
+  "srv/ClaimControlStream.srv"
   "msg/MoveTarget.msg"
   "msg/MoveTargetArray.msg"
   # --- 运控层 → 上游：状态与残差反馈 ---
@@ -46,6 +48,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   # --- 查询 ---
   "srv/GetMoveStatus.srv"
   "srv/QueryIk.srv"
+  "srv/QueryFk.srv"
   DEPENDENCIES std_msgs geometry_msgs
 )
 

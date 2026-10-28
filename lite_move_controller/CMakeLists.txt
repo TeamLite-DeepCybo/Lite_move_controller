@@ -33,6 +33,7 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(OpenSSL REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -230,3 +231,11 @@ ament_export_dependencies(rclcpp std_msgs geometry_msgs sensor_msgs std_srvs mov
                         yaml-cpp urdf)
 
 ament_package()
+
+if(BUILD_TESTING)
+  add_executable(test_bounded_stream test/test_bounded_stream.cpp)
+  target_include_directories(test_bounded_stream PRIVATE include)
+  add_test(NAME bounded_stream_contract COMMAND test_bounded_stream)
+endif()
+
+target_link_libraries(move_controller_node OpenSSL::Crypto)

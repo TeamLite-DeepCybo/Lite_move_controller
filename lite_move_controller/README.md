@@ -332,3 +332,36 @@ python3 src/Lite_move_controller/lite_move_controller/test/gripper_node_smoke.py
 `colcon test --packages-select lite_move_controller` 同时运行夹爪填帧与输入校验纯函数测试。
 DDS 回归覆盖无反馈启动、单侧初始化、显式零、独立目标、省略侧、非法批次、重启保持。
 通过仅证明离线软件行为；真实夹爪开合、跟踪和停止仍需人工验收。
+
+### Bounded joint/gripper stream (DCH adapter ingress)
+
+Set `bounded_stream_only:=true` explicitly to use `~/claim_control_stream`
+(`move_msgs/srv/ClaimControlStream`) and `~/control_batch`
+(`move_msgs/msg/ControlBatch`). This mode does not subscribe to legacy arm or
+internal gripper inputs. Do not launch `gripper_node` for this mode. It does not
+enable motors or claim the motor bridge; normal operator bringup still applies.
+
+Claim an empty stream, then continuously send full canonical batches in exactly
+the configured order, including grippers in metres. Arm positions are radians.
+The default 200 ms stream timeout follows the existing target timeout, and must
+be checked against measured deployment timing. Each batch is validated atomically
+against the model limits, timestamp and increasing sequence before staging.
+`MoveStatus.accepted_sequence` acknowledges staging; `applied_sequence` means the
+control thread consumed that target and published a control frame, not that the
+motor bridge accepted it or the robot arrived. Bridge authorization and measured
+tracking remain separate checks. A live owner cannot be replaced by a claim.
+
+`hold=true` changes the interpolation and persistent gripper owner to the supplied
+measured positions. On stream timeout the control thread latches its own measured
+arm/gripper positions, clears the owner and rejects delayed batches with the old
+token. It retains stiffness under the existing RUNNING/DWELL behavior; this is
+not disable, standby, zero torque or an emergency stop. Physical stopping and
+hold performance require supervised hardware acceptance. No restart resumes a
+previous stream.
+
+Read-only IK query status now follows its published four-value contract:
+EXACT=0, RESIDUAL=1, LIMIT_CLAMPED=2, FAILED=3. Queries reject invalid root
+frames, quaternions and seeds. `MoveStatus` reports the loaded URDF SHA-256 and
+actual limit table. Its `bridge_authorized` requires fresh bridge feedback,
+actual active source and TRACKING mode; a requested manual lock alone is not
+reported as actual authorization.

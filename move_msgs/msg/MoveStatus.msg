@@ -106,3 +106,19 @@ uint64 frames_rejected         # 因自身校验失败而未下发的帧数
 uint64 target_timeouts         # 目标超时次数（→ DWELL）
 uint64 limit_clamped           # 被 limit_guard 夹住的累计次数（非 0 要查）
 uint64 filter_resets           # 因时间戳跳变/四元数翻转等触发的滤波复位次数
+
+# Bounded-stream ingress acknowledgement. Accepted != applied != measured arrival.
+bool bounded_stream_only
+string stream_id
+string stream_command_id
+uint64 accepted_sequence
+uint64 applied_sequence
+bool stream_holding
+bool stream_expired
+string stream_rejection
+
+# Actual loaded URDF digest and limit table, not a launch parameter assertion.
+string model_sha256
+float64[] position_min
+float64[] position_max
+float64[] velocity_max

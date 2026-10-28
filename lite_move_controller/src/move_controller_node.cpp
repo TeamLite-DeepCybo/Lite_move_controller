@@ -45,13 +45,22 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <set>
+#include <openssl/sha.h>
+#include <iomanip>
 #include <array>
 #include <map>
 #include <sstream>
+#include <set>
+#include <openssl/sha.h>
+#include <iomanip>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
+#include <move_msgs/msg/control_batch.hpp>
+#include <move_msgs/srv/claim_control_stream.hpp>
+#include "lite_move_controller/bounded_stream.hpp"
 #include <move_msgs/msg/ee_residual.hpp>
 #include <move_msgs/msg/move_status.hpp>
 #include <move_msgs/msg/move_target_array.hpp>
@@ -256,6 +265,13 @@ public:
     }
     RCLCPP_INFO(get_logger(), "URDF 来源：%s（%zu 字节）",
                 urdf_source_.c_str(), urdf_text_.size());
+    {
+      unsigned char digest[SHA256_DIGEST_LENGTH];
+      SHA256(reinterpret_cast<const unsigned char *>(urdf_text_.data()), urdf_text_.size(), digest);
+      std::ostringstream hex;
+      for (auto byte : digest) {hex << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);}
+      model_sha256_ = hex.str();
+    }
     setupRosInterfaces();
     // ⚠️ limit_guard 必须在建臂之前、且**在 URDF 就绪之后**配置：
     //    它从 URDF 抽关节限位，早于 URDF ⇒ 拿到空串 ⇒ 静默退回默认 ±3.2 rad。
@@ -290,6 +306,8 @@ private:
   void declareParameters()
   {
     declare_parameter<std::string>("source_name", "lite_move_controller");
+    declare_parameter<bool>("bounded_stream_only", false);
+    declare_parameter<double>("bounded_stream_timeout_ms", 200.0);
     declare_parameter<std::string>("command_topic", "/lite_bridge/motion_command");
     declare_parameter<std::string>("joint_states_topic", "/joint_states");
     declare_parameter<std::vector<std::string>>("canonical_joints", {});
@@ -652,9 +670,14 @@ private:
     //    "最后一个被接受目标"的年龄间歇 > target_timeout_ms(200 ms)。
     {
       const bool use_ext_ik = get_parameter("use_external_ik").as_bool();
+      bounded_stream_only_ = get_parameter("bounded_stream_only").as_bool();
+      stream_.timeout_ms = get_parameter("bounded_stream_timeout_ms").as_double();
+      if (!std::isfinite(stream_.timeout_ms) || stream_.timeout_ms <= 0.0) {
+        throw std::invalid_argument("bounded_stream_timeout_ms must be finite and positive");
+      }
       rclcpp::SubscriptionOptions tgt_opt;
       tgt_opt.callback_group = target_cb_group_;   // 独立组（见上）
-      if (!use_ext_ik) {
+      if (!use_ext_ik && !bounded_stream_only_) {
         target_sub_ = create_subscription<move_msgs::msg::MoveTargetArray>(
             "~/task_target", rclcpp::QoS(20).reliable(),
             [this](move_msgs::msg::MoveTargetArray::SharedPtr m) {onTarget(m);}, tgt_opt);
@@ -664,12 +687,12 @@ private:
                     "运控层仅订阅 ~/joint_target 进行插值与力控映射，"
                     "~/task_target 留给 lite_ik_node 独占处理");
       }
-      joint_target_sub_ = create_subscription<move_msgs::msg::MoveTargetArray>(
+      if (!bounded_stream_only_) {joint_target_sub_ = create_subscription<move_msgs::msg::MoveTargetArray>(
           "~/joint_target", rclcpp::QoS(20).reliable(),
-          [this](move_msgs::msg::MoveTargetArray::SharedPtr m) {onTarget(m);}, tgt_opt);
+          [this](move_msgs::msg::MoveTargetArray::SharedPtr m) {onTarget(m);}, tgt_opt);}
     }
 
-    if (!gripper_idx_.empty()) {
+    if (!gripper_idx_.empty() && !bounded_stream_only_) {
       gripper_cmd_sub_ = create_subscription<sensor_msgs::msg::JointState>(
           gripper_command_topic_, rclcpp::QoS(10).reliable(),
           [this](const sensor_msgs::msg::JointState::SharedPtr m) {
@@ -698,6 +721,33 @@ private:
     }
     // ⚠️ /robot_description 的订阅**不在这里**建：它必须在 `acquireUrdf()` 之前
     //    就存在（否则等不到 transient_local 的历史消息），见 setupUrdfSubscription()。
+
+    if (bounded_stream_only_) {
+      stream_claim_srv_ = create_service<move_msgs::srv::ClaimControlStream>(
+        "~/claim_control_stream", [this](
+          const std::shared_ptr<move_msgs::srv::ClaimControlStream::Request> req,
+          std::shared_ptr<move_msgs::srv::ClaimControlStream::Response> res) {
+          std::lock_guard<std::mutex> lk(stream_mtx_);
+          res->ok = stream_.claim(req->expected_stream_id, req->new_stream_id, steadyNowMs());
+          res->message = res->ok ? "claimed; does not enable controller" : stream_.rejection;
+          res->stream_id = stream_.owner;
+        });
+      rclcpp::SubscriptionOptions stream_opt;
+      stream_opt.callback_group = target_cb_group_;
+      stream_sub_ = create_subscription<move_msgs::msg::ControlBatch>(
+        "~/control_batch", rclcpp::QoS(1).best_effort(),
+        [this](move_msgs::msg::ControlBatch::SharedPtr m) {
+          std::lock_guard<std::mutex> lk(stream_mtx_);
+          const auto & lim = guard_.limits();
+          const auto age_ms = (now() - rclcpp::Time(m->header.stamp)).seconds() * 1000.0;
+          if (!stream_.accept(m->stream_id, m->command_id, m->sequence, age_ms,
+            m->joint_names, m->positions, canonical_joints_, lim.position_min,
+            lim.position_max, m->hold, steadyNowMs())) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+              "Control batch rejected: %s (age=%.1f ms)", stream_.rejection.c_str(), age_ms);
+          }
+        }, stream_opt);
+    }
 
     enable_srv_ = create_service<std_srvs::srv::Trigger>(
         "~/enable", [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
@@ -1393,6 +1443,39 @@ private:
   void onTarget(const move_msgs::msg::MoveTargetArray::SharedPtr msg)
   {
     const std::int64_t now = steadyNowMs();
+    std::lock_guard<std::mutex> lk(arm_state_mtx_);
+    // Validate the entire legacy arm batch before any arm/filter changes.
+    std::set<std::string> seen;
+    for (const auto & t : msg->targets) {
+      auto * a = findArm(t.arm);
+      bool valid = a && seen.insert(t.arm).second &&
+        (t.frame_id.empty() || frame_id_.empty() || t.frame_id == frame_id_);
+      if (valid && t.target_type == move_msgs::msg::MoveTarget::TARGET_JOINTS) {
+        valid = t.joint_positions.size() == a->joints.size();
+        const auto & lim = guard_.limits();
+        for (std::size_t k = 0; valid && k < t.joint_positions.size(); ++k) {
+          const auto j = a->offset + k;
+          valid = std::isfinite(t.joint_positions[k]) && j < lim.position_min.size() &&
+            j < lim.position_max.size() && t.joint_positions[k] >= lim.position_min[j] &&
+            t.joint_positions[k] <= lim.position_max[j];
+        }
+      } else if (valid && t.target_type == move_msgs::msg::MoveTarget::TARGET_POSE) {
+        RawPoseSample probe;
+        probe.recv_ms = now; probe.recv_sys_ms = systemNowMs();
+        probe.has_stamp = t.header.stamp.sec != 0 || t.header.stamp.nanosec != 0;
+        probe.stamp_ms = static_cast<std::int64_t>(t.header.stamp.sec) * 1000 +
+          static_cast<std::int64_t>(t.header.stamp.nanosec) / 1000000;
+        probe.position = Vec3{t.position.x, t.position.y, t.position.z};
+        probe.orientation = Quat{t.orientation.x, t.orientation.y, t.orientation.z, t.orientation.w};
+        auto filter = a->filter;
+        valid = filter.push(probe);
+      } else {valid = false;}
+      if (!valid) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+          "Rejected whole arm target batch before mutation: unknown/duplicate/invalid target");
+        return;
+      }
+    }
     for (const auto & t : msg->targets) {
       if (t.gripper != 0.0) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
@@ -1730,6 +1813,8 @@ private:
     if (bridge_ != nullptr) {
       BridgeStatusLite st;
       if (bridge_->getStatus(st, kStateTickStatusBudgetSec)) {
+        std::lock_guard<std::mutex> bridge_lock(bridge_status_mtx_);
+        bridge_status_received_ms_ = steadyNowMs();
         bridge_active_source_ = st.active_source;
         bridge_manual_override_ = st.manual_override;
         // ↓ 原 pollBridge() 的职责（每拍读一次就够，别调两遍服务）
@@ -1820,6 +1905,7 @@ private:
         fail("锁源被拒：" + st.message + "（可用源：" + avail + "；请确认 bringup 传了 source_names:=" +
              source_name_ + "）");
       } else {
+        std::lock_guard<std::mutex> bridge_lock(bridge_status_mtx_);
         bridge_active_source_ = st.active_source;
         bridge_manual_override_ = st.manual_override;
         RCLCPP_INFO(get_logger(), "已锁源：active_source='%s' state=%s",
@@ -1849,6 +1935,7 @@ private:
     if (act.request_release_source) {
       BridgeStatusLite st;
       if (bridge_->setSource(0 /*AUTO*/, "", 0.0, st, 10.0)) {
+        std::lock_guard<std::mutex> bridge_lock(bridge_status_mtx_);
         bridge_active_source_ = st.active_source;
         bridge_manual_override_ = st.manual_override;
         RCLCPP_INFO(get_logger(), "已交权：active_source='%s'", st.active_source.c_str());
@@ -1914,12 +2001,58 @@ private:
   }
 
   // ------------------------------------------------------ 控制 tick（实时）
+  // Only the control thread mutates interpolation. Stream callbacks validate and
+  // stage a whole canonical batch. A timeout latches measured arm AND gripper
+  // targets before the state machine can continue publishing a former target.
+  void applyBoundedStream(std::int64_t now_ms)
+  {
+    if (!bounded_stream_only_ || !bridge_) {return;}
+    const auto snap = bridge_->snapshot();
+    if (!snap.covers(canonical_joints_.size())) {return;}
+    std::vector<double> q;
+    bool reset = false;
+    {
+      std::lock_guard<std::mutex> lk(stream_mtx_);
+      if (stream_.watchdog(now_ms)) {
+        q = snap.position; reset = true;
+        stream_tick_sequence_ = 0; stream_tick_owner_.clear();
+      } else if (stream_.pending) {
+        q = stream_.positions;
+        reset = stream_.holding &&
+          (!last_stream_hold_ || last_stream_command_ != stream_.command);
+        last_stream_hold_ = stream_.holding;
+        last_stream_command_ = stream_.command;
+        stream_tick_sequence_ = stream_.accepted;
+        stream_tick_owner_ = stream_.owner;
+        stream_.pending = false;
+      } else {return;}
+    }
+    std::scoped_lock lk(arm_state_mtx_, gripper_cmd_mtx_);
+    for (auto & a : arms_) {
+      const auto begin = q.begin() + static_cast<long>(a.offset);
+      const std::vector<double> arm_q(begin, begin + static_cast<long>(a.joints.size()));
+      a.joint_mode = true; a.joint_target = arm_q;
+      a.joint_target_ms = now_ms; a.have_target = true;
+      if (reset) {
+        a.filter.reset(); a.seg_active = false;
+        a.joint_active = arm_q; a.q_last = arm_q; a.q_seed = arm_q;
+        a.seg_q1 = arm_q; a.have_last_solution = true;
+        a.last_v.assign(arm_q.size(), 0.0); a.prev_cmd = arm_q;
+        a.have_goal = false;
+      }
+    }
+    for (std::size_t i = 0; i < gripper_idx_.size(); ++i) {
+      gripper_cmds_[i].position = q[gripper_idx_[i]];
+      gripper_pos_initialized_[i] = true;
+    }
+  }
+
   void onControlTick()
   {
     if (bridge_ == nullptr) {return;}
     const std::int64_t now = steadyNowMs();
     const NodeState st = sm_.state();
-    if (!statePublishes(st)) {return;}          // 不发帧（让桥超时 → SAFE_HOLD）
+    if (!statePublishes(st)) {applyBoundedStream(now); return;}          // 不发帧（让桥超时 → SAFE_HOLD）
     const auto tick_t0 = std::chrono::steady_clock::now();
 
     // ⚠️ DWELL 是"低频保持帧"（`statePublishesFullRate()` 为 false）：
@@ -1939,7 +2072,10 @@ private:
     // 接管前复位（控制线程内执行，见 onStateTick 的说明）。首帧必须是实测。
     if (reset_runtime_requested_.exchange(false, std::memory_order_acq_rel)) {
       resetArmRuntime(snap);
+      std::lock_guard<std::mutex> lk(stream_mtx_);
+      if (!stream_.owner.empty()) {stream_.pending = true;}
     }
+    applyBoundedStream(now);
 
     JointCommandFrame frame;
     frame.resize(n);
@@ -2052,6 +2188,10 @@ private:
     }
     bridge_->publish(frame.position, frame.velocity, frame.effort,
                      frame.stiffness, frame.damping);
+    if (bounded_stream_only_) {
+      std::lock_guard<std::mutex> lk(stream_mtx_);
+      if (stream_.owner == stream_tick_owner_) {stream_.applied = stream_tick_sequence_;}
+    }
     recordControlTick(std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - tick_t0).count());
     // 记录"实际下发节拍"（近 100 帧）—— 真机上帧率掉到 12.8 Hz 时，光看
@@ -2972,6 +3112,7 @@ private:
   // ------------------------------------------------------------- 反馈
   void fillStatus(move_msgs::msg::MoveStatus & s)
   {
+    std::lock_guard<std::mutex> bridge_lock(bridge_status_mtx_);
     // ⚠️ 持臂状态锁：下面的循环在**状态线程**上读 arms_，而控制线程正在
     //    solveArm 里重写同一批字段（std::vector/std::string）。见 arm_state_mtx_。
     //    `bridge_->snapshot()` 在锁内调用是安全的（它自己有锁，且不会回调本节点）。
@@ -2980,13 +3121,17 @@ private:
     s.state = static_cast<std::uint8_t>(sm_.state());
     s.state_name = nodeStateName(sm_.state());
     s.state_detail = sm_.detail();
+    s.model_sha256 = model_sha256_;
+    s.position_min = guard_.limits().position_min;
+    s.position_max = guard_.limits().position_max;
+    s.velocity_max = guard_.limits().velocity_max;
     s.control_mode = control_mode_;
     s.dynamics_model = dyn_model_kind_.empty() ? "unavailable" : dyn_model_kind_;
     bool any_inertia = false;
     for (const auto & a : arms_) {if (a.dyn.hasInertiaTerm()) {any_inertia = true;}}
     s.dynamics_has_inertia = any_inertia;
-    s.bridge_authorized = (bridge_active_source_ == source_name_) ||
-                          (bridge_manual_override_ == source_name_);
+    s.bridge_authorized = bridge_active_source_ == source_name_ && bridge_mode_ == 2 &&
+      bridge_status_received_ms_ != 0 && steadyNowMs()-bridge_status_received_ms_ <= target_timeout_ms_;
     s.bridge_active_source = bridge_active_source_;
     s.bridge_arbitration_state = bridge_arbitration_state_;
     s.bridge_mode = bridge_mode_;
@@ -3006,15 +3151,30 @@ private:
         if (j < s.q_desired.size()) {s.q_desired[j] = a.prev_cmd[k];}
       }
     }
+    {
+      std::lock_guard<std::mutex> lk(gripper_cmd_mtx_);
+      for (std::size_t i = 0; i < gripper_idx_.size(); ++i) {
+        if (gripper_pos_initialized_[i]) {s.q_desired[gripper_idx_[i]] = gripper_cmds_[i].position;}
+      }
+    }
+    {
+      std::lock_guard<std::mutex> lk(stream_mtx_);
+      s.bounded_stream_only = bounded_stream_only_;
+      s.stream_id = stream_.owner; s.stream_command_id = stream_.command;
+      s.accepted_sequence = stream_.accepted; s.applied_sequence = stream_.applied;
+      s.stream_holding = stream_.holding; s.stream_expired = stream_.expired;
+      s.stream_rejection = stream_.rejection;
+    }
     s.tau_measured = snap.effort;
     for (const auto & a : arms_) {
       s.arms.push_back(a.name);
-      s.ik_status.push_back(a.ik_status);
+      const auto outcome = static_cast<SolverOutcome>(a.ik_status);
+      s.ik_status.push_back(!a.solved_once || outcome == SolverOutcome::Failed ? 3 :
+        (outcome == SolverOutcome::LimitClamped ? 2 : (!a.exact ? 1 : 0)));
       // ⚠️ 未解过 IK 时**不要**报 "SOLVED"：那是默认值枚举 0。
       //    改用 "NOT_RUN"（上游一眼能看出"还没开始跑"而不是"解得很准"）。
-      s.ik_status_name.push_back(a.solved_once
-                                 ? solverOutcomeName(static_cast<SolverOutcome>(a.ik_status))
-                                 : std::string("NOT_RUN"));
+      s.ik_status_name.push_back(!a.solved_once ? "NOT_RUN" :
+        (outcome == SolverOutcome::Solved && !a.exact ? "RESIDUAL" : solverOutcomeName(outcome)));
       s.ik_residual_pos.push_back(a.residual_pos);
       s.ik_residual_rot.push_back(a.residual_rot);
       s.ik_action.push_back(a.ik_action);
@@ -3060,6 +3220,7 @@ private:
   void onIkQuery(const std::shared_ptr<move_msgs::srv::QueryIk::Request> req,
                  std::shared_ptr<move_msgs::srv::QueryIk::Response> res)
   {
+    res->model_sha256 = model_sha256_;
     ArmRuntime * arm = nullptr;
     if (!req->arm.empty()) {
       arm = findArm(req->arm);
@@ -3076,6 +3237,18 @@ private:
     //    "查询"与"控制"不会再同时进同一条臂的求解器（KDL 的 CartToJnt 尤其
     //    不是线程安全的 —— MoveIt 后端在内部有锁，KDL 没有）。
     std::lock_guard<std::mutex> arm_lock(arm_state_mtx_);
+    const auto & q = req->orientation;
+    const double norm2 = q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w;
+    if (req->frame_id != root_link_ || !std::isfinite(norm2) || std::fabs(norm2 - 1.0) > 0.002 ||
+        !std::isfinite(req->position.x) || !std::isfinite(req->position.y) ||
+        !std::isfinite(req->position.z) ||
+        (!req->seed_joints.empty() && req->seed_joints.size() != arm->joints.size()) ||
+        !std::all_of(req->seed_joints.begin(), req->seed_joints.end(),
+          [](double v) {return std::isfinite(v);})) {
+      res->ok = false; res->ik_status = 3; res->ik_status_name = "FAILED";
+      res->message = "invalid frame, pose or seed";
+      return;
+    }
     IkRequest r;
     r.position = Vec3{req->position.x, req->position.y, req->position.z};
     // ⚠️ 查询接口收的是四元数，转成旋转向量（与内部一致）
@@ -3101,8 +3274,11 @@ private:
     const IkResult out = arm->ik.solve(r);
     res->ok = true;
     res->message = out.note.empty() ? "ok" : out.note;
-    res->ik_status = static_cast<std::uint8_t>(out.outcome);
-    res->ik_status_name = solverOutcomeName(out.outcome);
+    res->ik_status = out.outcome == SolverOutcome::Failed ? 3 :
+      (out.outcome == SolverOutcome::LimitClamped ? 2 :
+      (out.residual_kind == TaskResidual::Residual ? 1 : 0));
+    res->ik_status_name = out.outcome == SolverOutcome::Solved &&
+      out.residual_kind == TaskResidual::Residual ? "RESIDUAL" : solverOutcomeName(out.outcome);
     res->position_residual.x = out.position_residual[0];
     res->position_residual.y = out.position_residual[1];
     res->position_residual.z = out.position_residual[2];
@@ -3118,6 +3294,7 @@ private:
   }
 
   // --------------------------------------------------------------- 成员
+  std::string model_sha256_;
   std::string source_name_, command_topic_, joint_states_topic_;
   std::vector<std::string> canonical_joints_, arm_names_;
   std::string root_link_, control_mode_, frame_id_;
@@ -3125,6 +3302,14 @@ private:
   /// ⚠️ `gripper_idx_` 为空 = canonical 里没有夹爪 ⇒ 控制帧里不碰这些关节。
   std::vector<std::string> gripper_joints_;
   std::vector<std::size_t> gripper_idx_;
+  bool bounded_stream_only_{false};
+  BoundedStream stream_;
+  std::mutex stream_mtx_;
+  bool last_stream_hold_{false};
+  std::string last_stream_command_, stream_tick_owner_;
+  std::uint64_t stream_tick_sequence_{0};
+  rclcpp::Subscription<move_msgs::msg::ControlBatch>::SharedPtr stream_sub_;
+  rclcpp::Service<move_msgs::srv::ClaimControlStream>::SharedPtr stream_claim_srv_;
   std::vector<GripperCommand> gripper_cmds_;
   std::vector<bool> gripper_pos_initialized_;
   double gripper_kp_{20.0};
@@ -3217,6 +3402,8 @@ private:
   std::atomic<bool> reset_runtime_requested_{false};
   std::atomic<bool> clear_fault_requested_{false};
   std::string violation_;
+  std::mutex bridge_status_mtx_;
+  std::int64_t bridge_status_received_ms_{0};
   std::string bridge_active_source_;
   std::string bridge_manual_override_;   ///< 桥的 manual_override（LOCK 成功后 = 本节点名）
   std::string bridge_arbitration_state_;

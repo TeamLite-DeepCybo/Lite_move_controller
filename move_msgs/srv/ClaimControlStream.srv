@@ -1,0 +1,7 @@
+# Compare-and-swap claim; empty expected only succeeds without a live owner.
+string expected_stream_id
+string new_stream_id
+---
+bool ok
+string message
+string stream_id

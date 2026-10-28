@@ -104,6 +104,8 @@ def generate_launch_description():
     urdf_arg = DeclareLaunchArgument(
         'urdf_path', default_value='',
         description='URDF 路径（空 = 用 /robot_description）。')
+    bounded_arg = DeclareLaunchArgument('bounded_stream_only', default_value='false',
+        description='Use atomic fenced ingress; disables legacy arm/gripper ingress and gripper_node.')
     auto_enable_arg = DeclareLaunchArgument(
         'auto_enable', default_value='false',
         description='是否起节点后自动 enable（真机建议 false）。')
@@ -165,6 +167,7 @@ def generate_launch_description():
             'control_rate_hz': float(s('control_rate_hz')),
             'urdf_path': s('urdf_path'),
             'auto_enable': b('auto_enable'),
+            'bounded_stream_only': b('bounded_stream_only'),
             'use_external_ik': b('enable_ik_node'),
         }
         if jm == 'arms_grippers':
@@ -190,7 +193,7 @@ def generate_launch_description():
         )
 
         nodes = [node]
-        if jm == 'arms_grippers':
+        if jm == 'arms_grippers' and not b('bounded_stream_only'):
             # 仅在 mode:=arms_grippers 时拉起增量夹爪控制节点
             nodes.append(Node(
                 package='lite_move_controller',
@@ -240,7 +243,7 @@ def generate_launch_description():
     from launch.actions import OpaqueFunction
     return LaunchDescription([
         mode_arg, joint_mode_arg, source_arg, params_json_arg, urdf_arg,
-        auto_enable_arg, rate_arg, enable_ik_node_arg, params_file_arg,
+        auto_enable_arg, bounded_arg, rate_arg, enable_ik_node_arg, params_file_arg,
         gripper_position_arg, gripper_kp_arg, gripper_kd_arg, gripper_torque_limit_arg,
         gripper_open_limit_arg,
         OpaqueFunction(function=_build),

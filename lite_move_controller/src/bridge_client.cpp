@@ -3,6 +3,7 @@
 //
 // bridge_client.cpp —— 见头文件的分层说明
 #include "lite_move_controller/bridge_client.hpp"
+#include "lite_move_controller/joint_feedback.hpp"
 
 #include <sensor_msgs/msg/joint_state.hpp>
 
@@ -74,6 +75,7 @@ void BridgeClient::onJointStates(const sensor_msgs::msg::JointState::SharedPtr m
 {
   // ⚠️ 回调里只做"索引 + 拷贝"，不做任何可能阻塞的事。
   //    `/joint_states` 是 100 Hz，这里慢了会拖垮整个 executor。
+  if (!validJointFeedback(msg->name, msg->position, msg->velocity, msg->effort)) {return;}
   const std::size_t n = canonical_joints_.size();
   std::vector<double> p(n, 0.0), v(n, 0.0), e(n, 0.0);
   std::vector<char> seen(n, 0);

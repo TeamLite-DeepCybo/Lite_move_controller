@@ -1815,6 +1815,7 @@ private:
       if (bridge_->getStatus(st, kStateTickStatusBudgetSec)) {
         std::lock_guard<std::mutex> bridge_lock(bridge_status_mtx_);
         bridge_status_received_ms_ = steadyNowMs();
+        bridge_controller_active_ = st.controller_active;
         bridge_active_source_ = st.active_source;
         bridge_manual_override_ = st.manual_override;
         // ↓ 原 pollBridge() 的职责（每拍读一次就够，别调两遍服务）
@@ -3130,7 +3131,7 @@ private:
     bool any_inertia = false;
     for (const auto & a : arms_) {if (a.dyn.hasInertiaTerm()) {any_inertia = true;}}
     s.dynamics_has_inertia = any_inertia;
-    s.bridge_authorized = bridge_active_source_ == source_name_ && bridge_mode_ == 2 &&
+    s.bridge_authorized = bridge_controller_active_ && bridge_active_source_ == source_name_ && bridge_mode_ == 2 &&
       bridge_status_received_ms_ != 0 && steadyNowMs()-bridge_status_received_ms_ <= target_timeout_ms_;
     s.bridge_active_source = bridge_active_source_;
     s.bridge_arbitration_state = bridge_arbitration_state_;
@@ -3404,6 +3405,7 @@ private:
   std::string violation_;
   std::mutex bridge_status_mtx_;
   std::int64_t bridge_status_received_ms_{0};
+  bool bridge_controller_active_{false};
   std::string bridge_active_source_;
   std::string bridge_manual_override_;   ///< 桥的 manual_override（LOCK 成功后 = 本节点名）
   std::string bridge_arbitration_state_;

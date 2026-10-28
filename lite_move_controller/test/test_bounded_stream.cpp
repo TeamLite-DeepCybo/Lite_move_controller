@@ -1,9 +1,15 @@
 #include <cassert>
 #include <limits>
 #include "lite_move_controller/bounded_stream.hpp"
+#include "lite_move_controller/joint_feedback.hpp"
 using lite_move_controller::BoundedStream;
 int main()
 {
+  assert(lite_move_controller::validJointFeedback({"a","b"}, {.1,.2}, {}, {}));
+  assert(!lite_move_controller::validJointFeedback({"a","b"}, {.1}, {}, {}));
+  assert(!lite_move_controller::validJointFeedback({"a","a"}, {.1,.2}, {}, {}));
+  assert(!lite_move_controller::validJointFeedback({"a"}, {.1}, {.1,.2}, {}));
+  assert(!lite_move_controller::validJointFeedback({"a"}, {std::numeric_limits<double>::quiet_NaN()}, {}, {}));
   BoundedStream s;
   std::vector<std::string> names{"arm", "gripper"};
   std::vector<double> lo{-1, 0}, hi{1, .047};

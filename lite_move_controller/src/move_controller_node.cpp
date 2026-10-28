@@ -3222,6 +3222,7 @@ private:
                  std::shared_ptr<move_msgs::srv::QueryIk::Response> res)
   {
     res->model_sha256 = model_sha256_;
+    res->ik_status = 3; res->ik_status_name = "FAILED";
     ArmRuntime * arm = nullptr;
     if (!req->arm.empty()) {
       arm = findArm(req->arm);

@@ -1,165 +1,22 @@
 #!/usr/bin/env python3
 """左圆右方测试驱动（关节预摆位 → 位姿形状，同一 TRACKING 内完成）。
 
-一揽子脚本：只要底层 bringup 已启动（MIT 模式），本脚本自动完成：
-  1. launch move_controller_node + lite_ik_node（自动杀残留实例）
-  2. 等待节点就绪 → 自动 enable 控制器
-  3. 预摆位 → 形状跟踪 → 统计报表
-  4. 退出时自动清理子进程
-
 特点：
 1. 几何对齐：在垂直于机器人对称面（X=0）的平面内绘图，双臂中点严格对称（距离对称面约 0.2m）。
 2. 全链路误差统计：在线统计并解耦 终端期望轨迹 (p_d)、终端规划轨迹 (p_plan)、终端跟踪轨迹 (p_act) 三者关系。
 3. 路径安全：纯本地 tmp 目录解析，杜绝 /tmp 根目录越界。
 """
-import sys, os
-
-# ---------------------------------------------------------------------------
-# 环境自适应引导：
-# 1. 自动定位工作区根目录
-# 2. 如果在 conda 环境（Python 版本与 ROS 不兼容）或未加载工作区库路径，
-#    自动补齐 LD_LIBRARY_PATH、PYTHONPATH 并切到系统 /usr/bin/python3 执行
-# ---------------------------------------------------------------------------
-def _find_workspace_root():
-    cur = os.path.dirname(os.path.abspath(__file__))
-    while cur and cur != os.path.dirname(cur):
-        if os.path.isdir(os.path.join(cur, 'install')) or os.path.isdir(os.path.join(cur, 'build')):
-            return cur
-        cur = os.path.dirname(cur)
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../..'))
-
-_ws_root = _find_workspace_root()
-_install_dir = os.path.join(_ws_root, 'install')
-
-_need_reexec = False
-_target_py = sys.executable
-
-if os.path.exists('/usr/bin/python3') and sys.executable != '/usr/bin/python3':
-    _target_py = '/usr/bin/python3'
-    _need_reexec = True
-
-_lib_dirs = []
-_py_dirs = []
-if os.path.exists(_install_dir):
-    for _d in os.listdir(_install_dir):
-        _lp = os.path.join(_install_dir, _d, 'lib')
-        if os.path.isdir(_lp):
-            _lib_dirs.append(_lp)
-        for _sub in ['lib/python3.12/site-packages', 'local/lib/python3.12/dist-packages']:
-            _pp = os.path.join(_install_dir, _d, _sub)
-            if os.path.isdir(_pp):
-                _py_dirs.append(_pp)
-
-_curr_ld = os.environ.get('LD_LIBRARY_PATH', '')
-if not all(_lp in _curr_ld for _lp in _lib_dirs if 'robstride_msgs' in _lp or 'move_msgs' in _lp):
-    _need_reexec = True
-
-if _need_reexec and '_AUTO_BOOTSTRAP_DONE' not in os.environ:
-    _new_ld = ':'.join(_lib_dirs) + (':' + _curr_ld if _curr_ld else '')
-    _curr_py = os.environ.get('PYTHONPATH', '')
-    _new_py = ':'.join(_py_dirs) + (':' + _curr_py if _curr_py else '')
-    _new_env = dict(os.environ, LD_LIBRARY_PATH=_new_ld, PYTHONPATH=_new_py, _AUTO_BOOTSTRAP_DONE='1')
-    os.execve(_target_py, [_target_py] + sys.argv, _new_env)
-
-import argparse, math, time, csv, signal, subprocess, shlex, atexit
+import argparse, math, time, sys, os, csv
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Float64
 from move_msgs.msg import MoveStatus, MoveTarget, MoveTargetArray
 from move_msgs.srv import GetMoveStatus
-from std_srvs.srv import Trigger
 from robstride_msgs.msg import SafetyStatus, MotionCommand
 import pinocchio as pin
-
-# ---------------------------------------------------------------------------
-# 自动拉起 move_controller launch 并在退出时清理
-# ---------------------------------------------------------------------------
-_launch_proc = None   # 全局引用，供 atexit / signal 清理
-_launch_log_file = None
-
-
-def _cleanup_launch():
-    """终止由本脚本拉起的 launch 子进程树。"""
-    global _launch_proc, _launch_log_file
-    if _launch_proc is None:
-        return
-    proc = _launch_proc
-    _launch_proc = None
-    if proc.poll() is None:
-        # 先 SIGINT（让 ros2 launch 优雅关闭子节点），2 s 后 SIGKILL
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGINT)
-        except OSError:
-            pass
-        try:
-            proc.wait(timeout=3.0)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except OSError:
-                pass
-    if _launch_log_file is not None:
-        try:
-            _launch_log_file.close()
-        except OSError:
-            pass
-        _launch_log_file = None
-
-
-def _launch_move_controller(ws, mode='regular', joint_mode='arms',
-                            auto_enable=False, extra_args=None):
-    """用 ros2 launch 拉起 move_controller_node + lite_ik_node。
-
-    返回 subprocess.Popen。调用前会自动杀掉残留的 move_controller_node 实例。
-    """
-    global _launch_proc, _launch_log_file
-
-    # 杀残留实例（与节点的 duplicate_instance_policy=kill 等效，但更可靠）
-    for proc_name in ['move_controller_node', 'lite_ik_node']:
-        try:
-            out = subprocess.check_output(
-                ['pgrep', '-f', proc_name], text=True).strip()
-            for pid_str in out.splitlines():
-                pid = int(pid_str.strip())
-                if pid != os.getpid():
-                    print(f"  ⚡ 杀掉残留 {proc_name} (PID {pid})")
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except OSError:
-                        pass
-                    time.sleep(0.1)
-        except (subprocess.CalledProcessError, ValueError):
-            pass  # 没找到残留进程，正常
-
-    # 构造 launch 命令
-    # source install/setup.bash 在 shell 里执行，确保环境正确
-    setup_bash = os.path.join(ws, 'install', 'setup.bash')
-    launch_cmd = (
-        f'source {shlex.quote(setup_bash)} && '
-        f'ros2 launch lite_move_controller move_controller.launch.py'
-        f' mode:={mode} joint_mode:={joint_mode}'
-        f' auto_enable:={"true" if auto_enable else "false"}'
-        f' duplicate_instance_policy:=kill'
-    )
-    if extra_args:
-        launch_cmd += ' ' + extra_args
-
-    log_dir = os.path.join(ws, 'tmp')
-    os.makedirs(log_dir, exist_ok=True)
-    log_path = os.path.join(log_dir, 'move_controller_launch.log')
-    _launch_log_file = open(log_path, 'w', buffering=1)
-
-    print(f"🚀 自动拉起 move_controller (日志: {log_path}): mode={mode}, joint_mode={joint_mode}")
-    proc = subprocess.Popen(
-        launch_cmd, shell=True, executable='/bin/bash',
-        stdout=_launch_log_file, stderr=subprocess.STDOUT,
-        preexec_fn=os.setsid,  # 新进程组，方便整组杀
-    )
-    _launch_proc = proc
-    atexit.register(_cleanup_launch)
-    return proc
 
 LEFT = ['left_shoulder_pitch', 'left_shoulder_roll', 'left_shoulder_yaw',
         'left_elbow_pitch', 'left_wrist_yaw', 'left_wrist_roll', 'left_wrist_pitch']
@@ -377,29 +234,22 @@ def print_and_save_stats(records, output_csv, plane_name, dist_sym, circle_d, sq
         print(f"⚠️ 保存 CSV 统计数据失败: {ex}")
 
 def main():
-    ws_default = _ws_root
+    ws_default = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..'))
     ws = os.environ.get('WS', ws_default)
 
     # 本地 tmp 路径安全回退
     candidate_urdfs = [
-        os.path.join(ws, 'src/tmp/dyid_runs/run_20261019_234605/robot.urdf'),
         os.path.join(ws, 'tmp/dyid_runs/run_20261019_234605/robot.urdf'),
-        os.path.join(ws, 'src/Lite_IK_node/config/model/lite_000_asm.urdf'),
-        os.path.join(ws, 'install/lite_ik_node/share/lite_ik_node/config/model/lite_000_asm.urdf'),
         os.path.join(ws, 'src/lite_ik_node/config/model/lite_000_asm.urdf'),
-        os.path.join(ws, 'src/lite_motor_controller/lite_description/urdf/lite_000_asm.urdf'),
+        os.path.join(ws, 'src/lite_description/urdf/lite_000_asm.urdf')
     ]
     default_urdf = next((u for u in candidate_urdfs if os.path.exists(u)), candidate_urdfs[0])
 
-    ap = argparse.ArgumentParser(description="左圆右方高精度轨迹测试与误差解耦统计一揽子驱动")
-    ap.add_argument('--mode', type=str, default='regular', choices=['regular', 'admittance', 'impedance'],
-                    help='运控层控制律模式：regular / admittance / impedance (默认 regular)')
-    ap.add_argument('--joint-mode', type=str, default='arms', choices=['arms', 'arms_grippers'],
-                    help='关节模式：arms (14) 或 arms_grippers (16) (默认 arms)')
-    ap.add_argument('--no-launch', action='store_true',
-                    help='不自动拉起 move_controller launch（若已在另一终端手动启动）')
-    ap.add_argument('--auto-enable', type=lambda s: s.lower() in ('1', 'true', 'yes', 'on'), default=True,
-                    help='自动调用 enable 服务激活控制器 (默认 True)')
+    ap = argparse.ArgumentParser(description="左圆右方高精度轨迹测试与误差解耦统计驱动")
+    ap.add_argument('--enable-gripper', dest='enable_gripper', action='store_true', default=True,
+                    help='启用夹爪三态循环开闭示范（默认启用）')
+    ap.add_argument('--no-gripper', '--disable-gripper', dest='enable_gripper', action='store_false',
+                    help='禁用夹爪控制示范')
     ap.add_argument('--prepose-sec', type=float, default=8.0, help='关节预摆位时间 (s)')
     ap.add_argument('--duration', type=float, default=200.0, help='形状测试运行时间 (s)')
     ap.add_argument('--speed', type=float, default=0.05, help='末端运行线速度 (m/s)')
@@ -452,30 +302,15 @@ def main():
     node.create_subscription(MotionCommand, '/lite_bridge/motion_command',
                              lambda m: st_cmd.update({n: p for n, p in zip(m.joint_names, m.position)}), 10)
     pub = node.create_publisher(MoveTargetArray, a.target_topic, 10)
+    pub_gripper = node.create_publisher(Float64, '/gripper/opening', 10)
 
-    print("等待 /joint_states 14 个关节就绪 (确保 lite_bringup 已启动)...")
+    print("等待 /joint_states 14 个关节就绪...")
     t0 = time.time()
-    while time.time() - t0 < 15.0 and len(st_meas) < 14:
+    while time.time() - t0 < 10.0 and len(st_meas) < 14:
         rclpy.spin_once(node, timeout_sec=0.1)
     if len(st_meas) < 14:
-        print("❌ 错误: 未能在 15 秒内收到 /joint_states 14 关节反馈。请确认 lite_bringup 是否正常运行并进入 MIT 模式！")
-        node.destroy_node()
-        rclpy.shutdown()
+        print("❌ 错误: /joint_states 未获取到 14 关节反馈")
         sys.exit(1)
-    print(f"✓ /joint_states 已就绪 ({len(st_meas)} 关节)")
-
-    # 客户端建立
-    status_cli = node.create_client(GetMoveStatus, '/lite_move_controller/get_status')
-    enable_cli = node.create_client(Trigger, '/lite_move_controller/enable')
-    disable_cli = node.create_client(Trigger, '/lite_move_controller/disable')
-    clear_fault_cli = node.create_client(Trigger, '/lite_move_controller/clear_fault')
-
-    # 一揽子自动拉起：如果尚未启动 move_controller，由脚本直接拉起
-    if not a.no_launch:
-        if not status_cli.service_is_ready():
-            _launch_move_controller(ws, mode=a.mode, joint_mode=a.joint_mode)
-        else:
-            print("✓ 检测到已在运行的 lite_move_controller 服务，复用该实例。")
 
     # 安全与控制器状态监视。
     # /safety_status 有 CAN0/CAN1 等多个发布者，绝不能用单个 level 保存最后一条
@@ -503,6 +338,7 @@ def main():
     )
     node.create_subscription(SafetyStatus, '/safety_status', on_safety, safety_qos)
     node.create_subscription(MoveStatus, '/lite_move_controller/status', on_move_status, 10)
+    status_cli = node.create_client(GetMoveStatus, '/lite_move_controller/get_status')
 
     def max_safety_level():
         return max((event[1] for event in safety_by_source.values()), default=0)
@@ -538,41 +374,19 @@ def main():
                 f'bridge={s.bridge_mode_name}, auth={s.bridge_authorized}, '
                 f'arb={s.bridge_arbitration_state}')
 
-    # 等待服务就绪
-    print("等待 lite_move_controller 节点与服务上线...")
-    t0 = time.time()
-    while time.time() - t0 < 30.0:
-        if status_cli.service_is_ready() and enable_cli.service_is_ready():
-            break
-        if _launch_proc is not None and _launch_proc.poll() is not None:
-            print(f"❌ lite_move_controller launch 异常退出 (exit code: {_launch_proc.poll()})")
-            log_path = os.path.join(ws, 'tmp/move_controller_launch.log')
-            if os.path.exists(log_path):
-                print("--- 启动日志末尾 ---")
-                with open(log_path, 'r') as lf:
-                    print(''.join(lf.readlines()[-30:]))
-            node.destroy_node(); rclpy.shutdown(); sys.exit(1)
-        time.sleep(0.5)
-    else:
-        print("❌ 30 s 内 lite_move_controller 服务未上线，退出！")
-        node.destroy_node(); rclpy.shutdown(); sys.exit(2)
-
-    def get_status_msg():
-        if not status_cli.service_is_ready():
-            return None
-        fut = status_cli.call_async(GetMoveStatus.Request())
-        rclpy.spin_until_future_complete(node, fut, timeout_sec=1.5)
-        res = fut.result()
-        if res is not None:
-            latest_move_status['msg'] = res.status
-            latest_move_status['recv_at'] = time.monotonic()
-            return res.status
-        return None
-
     def ready_state():
-        s = get_status_msg()
-        if s is None:
-            return False, 'get_status 服务未就绪或超时'
+        if not status_cli.service_is_ready():
+            return False, 'get_status 服务未就绪'
+        fut = status_cli.call_async(GetMoveStatus.Request())
+        rclpy.spin_until_future_complete(node, fut, timeout_sec=2.0)
+        r = fut.result()
+        if r is None:
+            return False, 'get_status 超时'
+        s = r.status
+        # 服务与状态话题同源。用这次确定回读刷新监视基线，避免刚进入 RUNNING
+        # 时仍拿话题队列里较早的 STANDBY/SWITCHING 样本做误判。
+        latest_move_status['msg'] = s
+        latest_move_status['recv_at'] = time.monotonic()
         ok = (s.state_name in ('RUNNING', 'DWELL') and s.bridge_authorized
               and s.bridge_mode_name == 'TRACKING'
               and s.bridge_arbitration_state != 'FAULT'
@@ -582,25 +396,9 @@ def main():
                     (s.state_name, s.bridge_mode_name, s.bridge_authorized,
                      s.bridge_arbitration_state, max_safety_level()))
 
-    print("等待 lite_move_controller 完成初始化并进入 STANDBY...")
+    print("检查控制器状态...")
     t0 = time.time()
-    while time.time() - t0 < 30.0:
-        st = get_status_msg()
-        if st is not None and st.state_name in ('STANDBY', 'RUNNING', 'DWELL', 'FAULT'):
-            print(f"✓ 运控节点已就绪: state={st.state_name}")
-            break
-        if _launch_proc is not None and _launch_proc.poll() is not None:
-            print(f"❌ lite_move_controller launch 异常退出 (exit code: {_launch_proc.poll()})")
-            sys.exit(1)
-        time.sleep(0.5)
-    else:
-        print("❌ 30 s 内 lite_move_controller 未进入就绪状态，退出！")
-        node.destroy_node(); rclpy.shutdown(); sys.exit(2)
-
-    print("激活并等待控制器进入 TRACKING (授权就绪)...")
-    t0 = time.time()
-    last_enable_call = 0.0
-    while time.time() - t0 < 35.0:
+    while time.time() - t0 < 25.0:
         ok, why = ready_state()
         if ok:
             print(f"✓ 控制器就绪: {why}")
@@ -609,29 +407,10 @@ def main():
             print(f"❌ 启动阶段检测到硬件安全故障："
                   f"{format_safety_event(fatal_safety['event'])}")
             node.destroy_node(); rclpy.shutdown(); sys.exit(3)
-
-        st = latest_move_status['msg']
-        curr_state = st.state_name if st else ''
-        if curr_state == 'FAULT':
-            print(f"控制器处于 FAULT ({st.state_detail})，调用 /lite_move_controller/clear_fault 清除故障...")
-            cfut = clear_fault_cli.call_async(Trigger.Request())
-            rclpy.spin_until_future_complete(node, cfut, timeout_sec=2.0)
-            time.sleep(0.5)
-        elif curr_state == 'STANDBY' and a.auto_enable:
-            now_sec = time.time()
-            if now_sec - last_enable_call >= 2.0:
-                last_enable_call = now_sec
-                print("控制器处于 STANDBY，正在调用 /lite_move_controller/enable 激活...")
-                efut = enable_cli.call_async(Trigger.Request())
-                rclpy.spin_until_future_complete(node, efut, timeout_sec=2.0)
-                eres = efut.result()
-                if eres is not None:
-                    print(f"  ✓ enable 请求结果: {eres.message}")
-
         print(f"等待控制器进入 TRACKING: {why}")
         time.sleep(1.0)
     else:
-        print("❌ 35 s 内未进入 TRACKING/授权，拒绝下发！")
+        print("❌ 25 s 内未进入 TRACKING/授权，拒绝下发！")
         node.destroy_node(); rclpy.shutdown(); sys.exit(2)
 
     # ---------------- 轨迹中心点与起始位姿解算 ----------------
@@ -768,6 +547,24 @@ def main():
 
             msg, pl_des, pr_des = pose_targets(tt, blend=blend_left)
             pub.publish(msg)
+
+            # 夹爪三态循环控制示范（全开 1.0 -> 半开 0.5 -> 全闭 0.0，各持续 10s）
+            grip_desc = ""
+            if a.enable_gripper:
+                cycle_t = t % 30.0
+                if cycle_t < 10.0:
+                    grip_val = 1.0
+                    grip_desc = "全开(1.0)"
+                elif cycle_t < 20.0:
+                    grip_val = 0.5
+                    grip_desc = "半开(0.5)"
+                else:
+                    grip_val = 0.0
+                    grip_desc = "全闭(0.0)"
+                g_msg = Float64()
+                g_msg.data = float(grip_val)
+                pub_gripper.publish(g_msg)
+
             rclpy.spin_once(node, timeout_sec=0.0)
             assert_runtime_healthy('形状跟踪阶段')
 
@@ -790,7 +587,8 @@ def main():
             if int(t) % 10 == 0 and abs(t - round(t)) < period / 2:
                 err_L = np.linalg.norm(pl_act - pl_des) * 1000.0
                 err_R = np.linalg.norm(pr_act - pr_des) * 1000.0
-                print(f"  t={t:5.1f} s | 跟踪总差: 左(圆) {err_L:4.1f} mm, 右(方) {err_R:4.1f} mm", flush=True)
+                g_str = f" | 夹爪状态: {grip_desc}" if a.enable_gripper else ""
+                print(f"  t={t:5.1f} s | 跟踪总差: 左(圆) {err_L:4.1f} mm, 右(方) {err_R:4.1f} mm{g_str}", flush=True)
 
             if a.duration > 0 and t >= a.duration + 1.0:
                 break
@@ -805,22 +603,12 @@ def main():
         exit_code = 130
         print("\n捕获中断信号，正在收尾退出...")
     finally:
-        # 退出收尾：调用 disable 释放控制权并清理后台进程
-        try:
-            if 'disable_cli' in locals() and disable_cli.service_is_ready():
-                print("\n🛑 退出收尾：调用 /lite_move_controller/disable 释放控制权...")
-                dis_fut = disable_cli.call_async(Trigger.Request())
-                rclpy.spin_until_future_complete(node, dis_fut, timeout_sec=2.0)
-        except Exception:
-            pass
-
         # 输出统计结果与报表
         plane_str = "竖直面 (X-Z)" if a.plane == 'vertical' else "水平面 (X-Y)"
         print_and_save_stats(
             records, a.stats_file, plane_str, a.dist_sym, a.circle_d, a.square_side)
         node.destroy_node()
         rclpy.shutdown()
-        _cleanup_launch()
     return exit_code
 
 if __name__ == '__main__':

@@ -321,19 +321,12 @@ private:
     //    ⇒ gripperIndices() 返回空 ⇒ **什么也不写**，旧行为一字不变。
     declare_parameter<std::vector<std::string>>(
         "gripper_joints", {"left_gripper", "right_gripper"});
-    /// 期望位置 [m]；0 = 完全夹到底（URDF 限位 [0, 0.047]）。
     declare_parameter<double>("gripper_position", 0.0);
-    /// 夹持刚度 [N/m] 与阻尼 [N·s/m]（**prismatic 单位**，不是 N·m/rad）。
-    ///
-    /// ⚠️ 20 N/m 与 3 N·s/m 是**很软**的一档：夹爪的力矩上限本来就由
-    ///    URDF effort=1 N（limit_guard 取 min(配置, URDF)）限死，所以实际
-    ///    夹持力最多 1 N；20 N/m 意味着"离目标 5 cm 才用满 1 N"，
-    ///    夹住笔时不会顶得太硬（用户实测 200/5 偏硬，改成 20/3）。
-    ///    kp 只决定"多快/多硬地压到 1 N"，不决定夹持力上限。
-    /// ⚠️ 这两个值必须同时抬 limit_guard 的 stiffness_max/damping_max（见
-    ///    setupLimitGuard）—— 否则 `default_stiffness`(20) 会把 kp 压到 20 以下。
     declare_parameter<double>("gripper_kp", 20.0);
     declare_parameter<double>("gripper_kd", 3.0);
+    declare_parameter<double>("gripper_torque_limit", 0.25);
+    declare_parameter<std::string>(
+        "gripper_command_topic", "/lite_move_controller/gripper_command");
     /// SRDF 路径（"" = 自动找 lite_ik_node 自带模型）。
     /// ⚠️ 插件要靠 SRDF 的 group 定义才知道"这条臂有哪些关节"；KDL 后端不需要它。
     declare_parameter<std::string>("srdf_path", "");
@@ -391,7 +384,7 @@ private:
     /// 下发目标（不改参考轨迹/IK），是"按实际位置决定发多快"的落点。
     declare_parameter<double>("max_command_lead_rad", 0.20);
     /// 关节模式（预摆位/回位）的峰值速度（rad/s）。段长 = 1.5·max|Δq|/v。
-    declare_parameter<double>("joint_speed_rad_s", 0.30);
+    declare_parameter<double>("joint_speed_rad_s", 1.20);
     /// 单段 Hermite 插值的**最长时间**（ms）。IK 卡住时不让一段插值无限延伸。
     declare_parameter<double>("segment_max_ms", 120.0);
     /// 启动时发现**其他 move_controller 实例**的策略：
@@ -463,15 +456,14 @@ private:
 
     // ---- 夹爪（可选；canonical 里没有就整段跳过）----------------------------
     gripper_joints_ = get_parameter("gripper_joints").as_string_array();
-    gripper_cmd_.position = get_parameter("gripper_position").as_double();
-    gripper_cmd_.stiffness = get_parameter("gripper_kp").as_double();
-    gripper_cmd_.damping = get_parameter("gripper_kd").as_double();
-    gripper_cmd_.velocity = 0.0;
-    gripper_cmd_.effort = 0.0;
-    if (!(gripper_cmd_.stiffness >= 0.0) || !(gripper_cmd_.damping >= 0.0) ||
-        !std::isfinite(gripper_cmd_.stiffness) || !std::isfinite(gripper_cmd_.damping) ||
-        !std::isfinite(gripper_cmd_.position)) {
-      load_error_ = "gripper_kp / gripper_kd / gripper_position 非法（必须非负且有限）";
+    gripper_kp_ = get_parameter("gripper_kp").as_double();
+    gripper_kd_ = get_parameter("gripper_kd").as_double();
+    gripper_torque_limit_ = get_parameter("gripper_torque_limit").as_double();
+    gripper_command_topic_ = get_parameter("gripper_command_topic").as_string();
+    if (!(gripper_kp_ >= 0.0) || !(gripper_kd_ >= 0.0) ||
+        !std::isfinite(gripper_kp_) || !std::isfinite(gripper_kd_) ||
+        !(gripper_torque_limit_ > 0.0) || !std::isfinite(gripper_torque_limit_)) {
+      load_error_ = "gripper_kp / gripper_kd / gripper_torque_limit 非法（必须非负且有限）";
       return false;
     }
     {
@@ -482,17 +474,24 @@ private:
                     "canonical(%zu) 里没有夹爪关节 → **不做夹爪控制**（14 关节模式的旧行为）",
                     canonical_joints_.size());
       } else {
+        gripper_cmds_.resize(gripper_idx_.size());
+        gripper_pos_initialized_.assign(gripper_idx_.size(), false);
+        for (std::size_t i = 0; i < gripper_idx_.size(); ++i) {
+          gripper_cmds_[i].position = 0.0;
+          gripper_cmds_[i].velocity = 0.0;
+          gripper_cmds_[i].effort = 0.0;
+          gripper_cmds_[i].stiffness = gripper_kp_;
+          gripper_cmds_[i].damping = gripper_kd_;
+        }
         std::string idxs;
         for (const auto k : gripper_idx_) {
           idxs += (idxs.empty() ? "" : ",") + canonical_joints_[k];
           idxs += "(@" + std::to_string(k) + ") ";
         }
         RCLCPP_INFO(get_logger(),
-                    "夹爪阻抗夹持：%s→ position=%.4f m, velocity=0, effort=0, "
-                    "kp=%.1f N/m, kd=%.1f N·s/m（力矩上限另由 limit_guard 按 URDF "
-                    "effort 压到 ≤1 N，属**轻夹**）",
-                    idxs.c_str(), gripper_cmd_.position, gripper_cmd_.stiffness,
-                    gripper_cmd_.damping);
+                    "夹爪独立控制：%s→ kp=%.1f N/m, kd=%.1f N·s/m, torque_max=%.2f N·m"
+                    "（未收到指令时保持实测位置，绝不主动压向 0）",
+                    idxs.c_str(), gripper_kp_, gripper_kd_, gripper_torque_limit_);
         std::string miss;
         for (const auto & m : missing) {miss += (miss.empty() ? "" : " ") + m;}
         if (!missing.empty()) {
@@ -665,6 +664,28 @@ private:
           "~/joint_target", rclcpp::QoS(20).reliable(),
           [this](move_msgs::msg::MoveTargetArray::SharedPtr m) {onTarget(m);}, tgt_opt);
     }
+
+    if (!gripper_idx_.empty()) {
+      gripper_cmd_sub_ = create_subscription<sensor_msgs::msg::JointState>(
+          gripper_command_topic_, rclcpp::QoS(10).reliable(),
+          [this](const sensor_msgs::msg::JointState::SharedPtr m) {
+            std::lock_guard<std::mutex> lock(gripper_cmd_mtx_);
+            for (std::size_t k = 0; k < m->name.size(); ++k) {
+              if (k >= m->position.size()) {break;}
+              const auto & name = m->name[k];
+              for (std::size_t i = 0; i < gripper_joints_.size(); ++i) {
+                if (gripper_joints_[i] == name && i < gripper_cmds_.size()) {
+                  const double pos = m->position[k];
+                  if (std::isfinite(pos)) {
+                    gripper_cmds_[i].position = pos;
+                    gripper_pos_initialized_[i] = true;
+                  }
+                  break;
+                }
+              }
+            }
+          });
+    }
     // ⚠️ /robot_description 的订阅**不在这里**建：它必须在 `acquireUrdf()` 之前
     //    就存在（否则等不到 transient_local 的历史消息），见 setupUrdfSubscription()。
 
@@ -755,14 +776,13 @@ private:
               for (std::size_t i = 0; i < gripper_idx_.size(); ++i) {
                 gdiag += (i ? "," : "") + std::to_string(gripper_idx_[i]);
               }
+              std::lock_guard<std::mutex> lock(gripper_cmd_mtx_);
+              double p0 = gripper_cmds_.empty() ? 0.0 : gripper_cmds_[0].position;
               char g[220];
               std::snprintf(g, sizeof(g),
-                            "] pos=%.4f vel=0 effort=0 kp=%.1f kd=%.1f"
-                            " torque_max=%.2f（URDF effort 额定，轻夹）",
-                            gripper_cmd_.position, gripper_cmd_.stiffness,
-                            gripper_cmd_.damping,
-                            guard_.limits().size() > gripper_idx_[0]
-                              ? guard_.limits().torque_max[gripper_idx_[0]] : 0.0);
+                            "] pos0=%.4f vel=0 effort=0 kp=%.1f kd=%.1f"
+                            " torque_max=%.2f N·m",
+                            p0, gripper_kp_, gripper_kd_, gripper_torque_limit_);
               gdiag += g;
             }
             res->message = std::string("ok（URDF 来自 ") + urdf_source_ + "，" +
@@ -1182,19 +1202,31 @@ private:
       // **不能直接比较**。真正的一致性由下面的关节名/连杆名匹配保证。
       (void)buf;
     }
-    // ③ 关节名与 canonical 对齐（params.json 的 joints 是该次辨识的 14 个）
-    if (!params.joints.empty() && params.joints.size() != canonical_joints_.size()) {
+    // ③ 关节名与双臂 14 轴对齐（params.json 是双臂 14 轴辨识结果，不含夹爪）
+    std::vector<std::string> arm_joints_expected;
+    if (has_parameter("joints_left") && has_parameter("joints_right")) {
+      const auto jl = get_parameter("joints_left").as_string_array();
+      const auto jr = get_parameter("joints_right").as_string_array();
+      arm_joints_expected.insert(arm_joints_expected.end(), jl.begin(), jl.end());
+      arm_joints_expected.insert(arm_joints_expected.end(), jr.begin(), jr.end());
+    }
+    if (arm_joints_expected.empty()) {
+      for (const auto & j : canonical_joints_) {
+        if (std::find(gripper_joints_.begin(), gripper_joints_.end(), j) == gripper_joints_.end()) {
+          arm_joints_expected.push_back(j);
+        }
+      }
+    }
+    if (!params.joints.empty() && params.joints.size() != arm_joints_expected.size()) {
       err = "params.json 的 joints 数(" + std::to_string(params.joints.size()) +
-            ") 与 canonical(" + std::to_string(canonical_joints_.size()) + ") 不符";
+            ") 与双臂关节数(" + std::to_string(arm_joints_expected.size()) + ") 不符";
       return false;
     }
-    // 更严格的检查：关节名必须**逐个一致**（顺序错会让前馈加到错误的关节上，
-    // 而且每个数值看起来都合理 —— 本项目反复强调的最难查的一类故障）
     if (!params.joints.empty()) {
       for (std::size_t k = 0; k < params.joints.size(); ++k) {
-        if (params.joints[k] != canonical_joints_[k]) {
+        if (params.joints[k] != arm_joints_expected[k]) {
           err = "params.json 的 joints[" + std::to_string(k) + "]='" + params.joints[k] +
-                "' 与 canonical='" + canonical_joints_[k] + "' 不符";
+                "' 与 expected='" + arm_joints_expected[k] + "' 不符";
           return false;
         }
       }
@@ -1944,8 +1976,20 @@ private:
     // ⚠️ 必须放在 limit_guard 之前、且在两臂 IK 之后：夹爪不参与 IK，但它和
     //    手臂在同一帧里下发；顺序反了会让"臂刚解完的帧"覆盖掉夹爪命令。
     if (!gripper_idx_.empty()) {
+      std::vector<GripperCommand> cmds;
+      {
+        std::lock_guard<std::mutex> lock(gripper_cmd_mtx_);
+        for (std::size_t i = 0; i < gripper_idx_.size(); ++i) {
+          const std::size_t k = gripper_idx_[i];
+          if (!gripper_pos_initialized_[i] && snap.valid && k < snap.position.size()) {
+            gripper_cmds_[i].position = snap.position[k];
+            gripper_pos_initialized_[i] = true;
+          }
+        }
+        cmds = gripper_cmds_;
+      }
       const std::size_t nw = applyGripperCommands(
-          gripper_idx_, gripper_cmd_, frame.position, frame.velocity, frame.effort,
+          gripper_idx_, cmds, frame.position, frame.velocity, frame.effort,
           frame.stiffness, frame.damping);
       if (nw == 0) {
         // 帧长度/下标异常（理论上 configure 阶段就挡住了）⇒ 整帧不发。
@@ -2093,6 +2137,28 @@ private:
       if (v.empty()) {return;}
       if (v.size() == 1 && v[0] == kUnsetSentinel) {return;}   // 未配置
       if (v.size() == dst.size()) {dst.assign(v.begin(), v.end()); return;}
+      if (v.size() == 14 && dst.size() == 16 && gripper_idx_.size() == 2 &&
+          gripper_idx_[0] == 7 && gripper_idx_[1] == 15) {
+        // 用户配置了 14 关节的臂限位（如 impedance_test_200s.yaml），自动映射到 16 关节模式的臂槽位
+        for (std::size_t k = 0; k < 7; ++k) {
+          dst[k] = v[k];
+          dst[8 + k] = v[7 + k];
+        }
+        RCLCPP_INFO(get_logger(),
+                    "参数 %s 长度 14 自动适配到 16 关节（双臂 14 轴正确映射，夹爪维持独立限位）",
+                    name);
+        return;
+      }
+      if (v.size() == 16 && dst.size() == 14) {
+        for (std::size_t k = 0; k < 7; ++k) {
+          dst[k] = v[k];
+          dst[7 + k] = v[8 + k];
+        }
+        RCLCPP_INFO(get_logger(),
+                    "参数 %s 长度 16 自动适配到 14 关节（双臂 14 轴正确映射，忽略夹爪）",
+                    name);
+        return;
+      }
       RCLCPP_WARN(get_logger(), "参数 %s 长度 %zu != 关节数 %zu → 忽略（用 URDF 限位）",
                   name, v.size(), dst.size());
     };
@@ -2103,16 +2169,14 @@ private:
     override_vec("stiffness_limit", lim.stiffness_max);
     override_vec("damping_limit", lim.damping_max);
 
-    // ⚠️ 夹爪的**增益上限**要抬到命令值：`stiffness_max/damping_max` 的默认是
-    //    `default_stiffness`(20) / `default_damping`(1)，而夹持要 200 / 5 ——
-    //    不抬的话 limit_guard 会把夹持刚度压成 20（夹不住笔，而且日志里只有一行
-    //    "clamped_gain" 计数）。
-    //    安全边界没有因此放宽：**力**由 torque_max(≤ URDF effort=1 N) 限死，
-    //    kp 只决定多快压到那个力。
+    // ⚠️ 夹爪力矩上限与增益上限约束：
+    //    力矩上限按启动参数 gripper_torque_limit（默认 0.25 N·m）严格截断，
+    //    增益上限至少放行配置的 gripper_kp/kd。
     for (const std::size_t k : gripper_idx_) {
       if (k >= n) {continue;}
-      lim.stiffness_max[k] = std::max(lim.stiffness_max[k], gripper_cmd_.stiffness);
-      lim.damping_max[k] = std::max(lim.damping_max[k], gripper_cmd_.damping);
+      lim.torque_max[k] = gripper_torque_limit_;
+      lim.stiffness_max[k] = std::max(lim.stiffness_max[k], gripper_kp_);
+      lim.damping_max[k] = std::max(lim.damping_max[k], gripper_kd_);
     }
 
     std::string err;
@@ -3043,11 +3107,18 @@ private:
   std::string source_name_, command_topic_, joint_states_topic_;
   std::vector<std::string> canonical_joints_, arm_names_;
   std::string root_link_, control_mode_, frame_id_;
-  /// 夹爪（prismatic）：名字（参数原样）、在 canonical 里的下标、命令。
+  /// 夹爪（prismatic）：名字（参数原样）、在 canonical 里的下标、独立命令。
   /// ⚠️ `gripper_idx_` 为空 = canonical 里没有夹爪 ⇒ 控制帧里不碰这些关节。
   std::vector<std::string> gripper_joints_;
   std::vector<std::size_t> gripper_idx_;
-  GripperCommand gripper_cmd_{};
+  std::vector<GripperCommand> gripper_cmds_;
+  std::vector<bool> gripper_pos_initialized_;
+  double gripper_kp_{20.0};
+  double gripper_kd_{3.0};
+  double gripper_torque_limit_{0.25};
+  std::string gripper_command_topic_{"/lite_move_controller/gripper_command"};
+  mutable std::mutex gripper_cmd_mtx_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr gripper_cmd_sub_;
   double control_rate_hz_{100.0}, dwell_rate_hz_{20.0};
   /// IK 重解节拍（Hz）与周期（ms）。**只用来限"最早什么时候再解"**；
   /// 插值段按墙钟推进，所以 IK 慢/抖不会让下发曲线变形（见 solveArm ⑤⑥）。
@@ -3062,7 +3133,7 @@ private:
   /// 单段 Hermite 的最长时间（ms）。
   double segment_max_ms_{120.0};
   /// 关节模式峰值速度（rad/s）。
-  double joint_speed_{0.30};
+  double joint_speed_{1.20};
   /// 重复实例策略：ask / kill / abort。
   std::string duplicate_policy_{"ask"};
   std::uint64_t lead_clamped_{0};

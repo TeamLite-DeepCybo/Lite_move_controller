@@ -157,6 +157,11 @@ target_link_libraries(move_controller_node
 ament_target_dependencies(move_controller_node
   rclcpp std_msgs geometry_msgs sensor_msgs std_srvs move_msgs robstride_msgs)
 
+# 夹爪增量控制节点：仅在 mode:=arms_grippers 模式下启动
+add_executable(gripper_node src/gripper_node.cpp)
+target_link_libraries(gripper_node lite_move_controller_core)
+ament_target_dependencies(gripper_node rclcpp std_msgs sensor_msgs)
+
 # 测试数据源：左手圆 / 右手方形（S6）。**只在测试时起**，不属于运控链路的必需件。
 add_executable(move_shape_source src/shape_source_node.cpp)
 target_link_libraries(move_shape_source lite_move_controller_core)
@@ -204,7 +209,7 @@ install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 
-install(TARGETS move_controller_node move_shape_source
+install(TARGETS move_controller_node move_shape_source gripper_node
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 install(TARGETS lite_move_controller_dynamics lite_move_controller_bridge

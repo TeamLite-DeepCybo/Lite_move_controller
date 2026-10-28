@@ -78,10 +78,45 @@ inline std::vector<std::size_t> gripperIndices(
   return idx;
 }
 
-/// 把夹爪命令写进一帧（纯函数）。
+/// 把多个夹爪的独立命令写进一帧（纯函数）。
 ///
 /// @param idx   `gripperIndices()` 的结果
-/// @param cmd   夹爪命令
+/// @param cmds  夹爪命令列表，长度必须精确等于 idx.size()
+/// @param position/velocity/effort/stiffness/damping  帧的五个数组（长度 = canonical 数）
+/// @return 实际写入了几个关节（0 = 没写：idx 为空、cmds 长度不匹配或任一数组长度不够）
+inline std::size_t applyGripperCommands(
+  const std::vector<std::size_t> & idx,
+  const std::vector<GripperCommand> & cmds,
+  std::vector<double> & position,
+  std::vector<double> & velocity,
+  std::vector<double> & effort,
+  std::vector<double> & stiffness,
+  std::vector<double> & damping)
+{
+  if (idx.empty() || cmds.size() != idx.size()) {return 0;}
+  const std::size_t n = position.size();
+  if (velocity.size() != n || effort.size() != n ||
+      stiffness.size() != n || damping.size() != n) {
+    return 0;
+  }
+  for (const std::size_t k : idx) {
+    if (k >= n) {return 0;}          // 下标越界 ⇒ 整体放弃（不写半帧）
+  }
+  for (std::size_t i = 0; i < idx.size(); ++i) {
+    const std::size_t k = idx[i];
+    position[k] = cmds[i].position;
+    velocity[k] = cmds[i].velocity;
+    effort[k] = cmds[i].effort;
+    stiffness[k] = cmds[i].stiffness;
+    damping[k] = cmds[i].damping;
+  }
+  return idx.size();
+}
+
+/// 把统一夹爪命令写进一帧（纯函数，向下兼容）。
+///
+/// @param idx   `gripperIndices()` 的结果
+/// @param cmd   统一夹爪命令
 /// @param position/velocity/effort/stiffness/damping  帧的五个数组（长度 = canonical 数）
 /// @return 实际写入了几个关节（0 = 没写：idx 为空或任一数组长度不够）
 ///
@@ -96,23 +131,8 @@ inline std::size_t applyGripperCommands(
   std::vector<double> & stiffness,
   std::vector<double> & damping)
 {
-  if (idx.empty()) {return 0;}
-  const std::size_t n = position.size();
-  if (velocity.size() != n || effort.size() != n ||
-      stiffness.size() != n || damping.size() != n) {
-    return 0;
-  }
-  for (const std::size_t k : idx) {
-    if (k >= n) {return 0;}          // 下标越界 ⇒ 整体放弃（不写半帧）
-  }
-  for (const std::size_t k : idx) {
-    position[k] = cmd.position;
-    velocity[k] = cmd.velocity;
-    effort[k] = cmd.effort;
-    stiffness[k] = cmd.stiffness;
-    damping[k] = cmd.damping;
-  }
-  return idx.size();
+  std::vector<GripperCommand> cmds(idx.size(), cmd);
+  return applyGripperCommands(idx, cmds, position, velocity, effort, stiffness, damping);
 }
 
 }  // namespace lite_move_controller

@@ -172,6 +172,28 @@ int main()
     CHECK(std::fabs(pos[15] - 0.023) < 1e-12, "position 应如实写入 0.023，得到 %f", pos[15]);
   }
 
+  // ---- ⑩ 左右夹爪独立开度写入（向量重载）----
+  {
+    const auto idx = gripperIndices(canonical16(), kGrippers);
+    std::vector<GripperCommand> cmds(2);
+    cmds[0].position = 0.047; // 左爪全开
+    cmds[0].stiffness = 20.0;
+    cmds[0].damping = 3.0;
+    cmds[1].position = 0.0;   // 右爪全闭
+    cmds[1].stiffness = 30.0;
+    cmds[1].damping = 4.0;
+    std::vector<double> pos(16, 0.0), vel(16, 0.0), eff(16, 0.0), kp(16, 0.0), kd(16, 0.0);
+    CHECK(applyGripperCommands(idx, cmds, pos, vel, eff, kp, kd) == 2, "应写入 2 个");
+    CHECK(std::fabs(pos[7] - 0.047) < 1e-12, "左爪 position 应为 0.047");
+    CHECK(std::fabs(kp[7] - 20.0) < 1e-12, "左爪 kp 应为 20.0");
+    CHECK(std::fabs(pos[15] - 0.0) < 1e-12, "右爪 position 应为 0.0");
+    CHECK(std::fabs(kp[15] - 30.0) < 1e-12, "右爪 kp 应为 30.0");
+
+    // 长度不匹配测试
+    cmds.pop_back();
+    CHECK(applyGripperCommands(idx, cmds, pos, vel, eff, kp, kd) == 0, "cmds 长度不匹配时应返回 0");
+  }
+
   std::printf("\n%d checks, %d failures\n", g_n, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

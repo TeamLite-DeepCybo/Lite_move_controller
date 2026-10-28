@@ -40,9 +40,11 @@ lite_move_controller:
     # ⚠️ 夹持力上限不是 kp，而是 limit_guard 的 torque_max ＝
     #    min(配置, URDF effort=1 N) ⇒ 本机是"轻夹 1 N"。
     gripper_joints: ["left_gripper", "right_gripper"]
-    gripper_position: 0.0       # m；0 = 完全夹到底（URDF 限位 [0, 0.047]）
+    gripper_position: 0.0       # m；未收到指令前维持实测位置
     gripper_kp: 20.0            # N/m（很软的一档；200 实测偏硬）
     gripper_kd: 3.0             # N·s/m
+    gripper_torque_limit: 0.25  # N·m；夹爪电机力矩截断上限（默认 0.25 N·m）
+    gripper_command_topic: "/lite_move_controller/gripper_command"
 
     # --- 模型与参数来源 -----------------------------------------------------
     # 空 = 用 /robot_description（robot_state_publisher 发，transient_local）

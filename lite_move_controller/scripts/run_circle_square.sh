@@ -40,18 +40,27 @@ if [[ "${N_CM:-0}" != "1" || "${N_BR:-0}" != "1" ]]; then
   echo "  pkill -f 'lite_bringup.launch.py'; pkill -f ros2_control_node; pkill -f bridge_node"
   exit 1
 fi
-# /joint_states 必须已有 14 个关节（否则控制器起来也动不了）
+# /joint_states 必须已有 14 或 16 个关节（否则控制器起来也动不了）
 NJS=$( (timeout 8 ros2 topic echo /joint_states --once --field name 2>/dev/null || true) \
         | grep -o "'[a-z_]*'" | wc -l)
 if [[ "${NJS:-0}" -lt 14 ]]; then
-  echo "✗ /joint_states 只有 ${NJS:-0} 个关节（需要 14）。检查 joint_state_broadcaster / 电机供电。"
+  echo "✗ /joint_states 只有 ${NJS:-0} 个关节（需要 ≥14）。检查 joint_state_broadcaster / 电机供电。"
   exit 1
 fi
+if [[ "${NJS:-0}" -ge 16 ]]; then
+  DETECTED_MODE="arms_grippers"
+  echo "✓ /joint_states 包含 ${NJS} 个关节，自动适配 mode:=arms_grippers（带夹爪控制）"
+else
+  DETECTED_MODE="arms"
+  echo "✓ /joint_states 包含 ${NJS} 个关节，自动适配 mode:=arms（纯臂模式）"
+fi
+JOINT_MODE=${JOINT_MODE:-${DETECTED_MODE}}
 STATUS=$(timeout 10 ros2 service call /lite_bridge/get_status \
   robstride_msgs/srv/GetBridgeStatus "{}" 2>/dev/null || true)
 if [[ "${STATUS}" != *"protocol_name='mit'"* ]]; then
   echo "✗ 桥不在 MIT（或未启动）。先起 bringup："
   echo "  ros2 launch lite_bringup lite_bringup.launch.py mode:=arms controller:=modes control_mode:=mit source_names:=lite_move_controller"
+  echo "  ros2 launch lite_bringup lite_bringup.launch.py mode:=${JOINT_MODE} controller:=modes control_mode:=mit source_names:=lite_move_controller"
   exit 1
 fi
 if [[ "${STATUS}" != *"lite_move_controller"* ]]; then
@@ -61,21 +70,35 @@ fi
 
 echo "[2/4] 起 move_controller 与 lite_ik_node 微分逆解节点（若未在跑）"
 if ! ros2 node list 2>/dev/null | grep -qx '/lite_move_controller' || \
-   ! ros2 node list 2>/dev/null | grep -qx '/lite_ik_node'; then
+   ! ros2 node list 2>/dev/null | grep -qx '/lite_ik_node' || \
+   ([[ "${JOINT_MODE}" == "arms_grippers" ]] && ! ros2 node list 2>/dev/null | grep -qx '/gripper_node'); then
   # 若有孤立旧实例在跑，先杀掉以彻底杜绝单节点旧实例抢占话题或丢失外部 IK
   pkill -f "move_controller_node" 2>/dev/null || true
   pkill -f "lite_ik_node" 2>/dev/null || true
+  pkill -f "gripper_node" 2>/dev/null || true
   sleep 0.8
   mkdir -p "${WS}/log"
   ros2 launch lite_move_controller move_controller.launch.py mode:=impedance \
-    enable_ik_node:=true params_file:="${PARAMS}" > "${WS}/log/lmc_test_controller.log" 2>&1 &
+    joint_mode:="${JOINT_MODE}" enable_ik_node:=true params_file:="${PARAMS}" > "${WS}/log/lmc_test_controller.log" 2>&1 &
   for _ in $(seq 1 40); do
     if ros2 node list 2>/dev/null | grep -qx '/lite_move_controller' && \
        ros2 node list 2>/dev/null | grep -qx '/lite_ik_node'; then
+      if [[ "${JOINT_MODE}" == "arms_grippers" ]] && ! ros2 node list 2>/dev/null | grep -qx '/gripper_node'; then
+        sleep 0.2
+        continue
+      fi
       break
     fi
     sleep 0.5
   done
+  if ! ros2 node list 2>/dev/null | grep -qx '/lite_move_controller' || \
+     ! ros2 node list 2>/dev/null | grep -qx '/lite_ik_node' || \
+     ([[ "${JOINT_MODE}" == "arms_grippers" ]] && ! ros2 node list 2>/dev/null | grep -qx '/gripper_node'); then
+    echo "✗ 节点未能成功启动，请检查日志：${WS}/log/lmc_test_controller.log"
+    tail -n 25 "${WS}/log/lmc_test_controller.log" 2>/dev/null || true
+    exit 1
+  fi
+  echo "✓ 节点启动就绪（lite_move_controller, lite_ik_node$([[ "${JOINT_MODE}" == "arms_grippers" ]] && echo ", gripper_node")）"
 fi
 
 echo "[3/4] enable（内部会经过 HOLD 再切 TRACKING）"
@@ -88,12 +111,16 @@ fi
 timeout 15 ros2 service call /lite_move_controller/enable std_srvs/srv/Trigger "{}" >/dev/null
 
 echo "[4/4] 预摆位 ${PREPOSE}s + 形状 ${DURATION}s（速度 ${SPEED} m/s）"
+GRIPPER_ARG=""
+if [[ "${ENABLE_GRIPPER:-1}" == "0" ]]; then
+  GRIPPER_ARG="--no-gripper"
+fi
 trap 'timeout 10 ros2 service call /lite_move_controller/disable std_srvs/srv/Trigger "{}" >/dev/null 2>&1 || true' EXIT
 /usr/bin/python3 "${WS}/src/lite_move_controller/scripts/run_circle_square.py" \
   --prepose-sec "${PREPOSE}" --duration "${DURATION}" --speed "${SPEED}" \
   --circle-d 0.12 --square-side 0.08 \
   --dist-sym "${DIST_SYM}" --plane "${PLANE}" \
   --urdf "${WS}/tmp/dyid_runs/run_20261019_234605/robot.urdf" \
-  --stats-file "${STATS_FILE}"
+  --stats-file "${STATS_FILE}" ${GRIPPER_ARG}
 
 echo "完成：控制器回到 STANDBY；桥会 SAFE_HOLD 顶住最后目标（HOLD 会漂移，属正常）"

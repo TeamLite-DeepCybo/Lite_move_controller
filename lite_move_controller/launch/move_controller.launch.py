@@ -121,11 +121,16 @@ def generate_launch_description():
         description='夹爪期望位置 [m]；0 = 完全夹到底（URDF 限位 [0, 0.047]）。')
     gripper_kp_arg = DeclareLaunchArgument(
         'gripper_kp', default_value='20.0',
-        description='夹爪刚度 [N/m]（prismatic！）。夹持力上限由 URDF effort=1 N '
-                    '限死，所以这是"轻夹"。')
+        description='夹爪刚度 [N/m]（prismatic！）。')
     gripper_kd_arg = DeclareLaunchArgument(
         'gripper_kd', default_value='3.0',
         description='夹爪阻尼 [N·s/m]（prismatic！）。')
+    gripper_torque_limit_arg = DeclareLaunchArgument(
+        'gripper_torque_limit', default_value='0.25',
+        description='夹爪力矩上限（N·m，默认 0.25 N·m）。')
+    gripper_open_limit_arg = DeclareLaunchArgument(
+        'gripper_open_limit', default_value='0.047',
+        description='夹爪全开对应的物理行程上限（默认 0.047 m；若传 47 则适配 47 标度）。')
 
     def _build(context):
         def s(name):
@@ -154,6 +159,7 @@ def generate_launch_description():
             'gripper_position': float(s('gripper_position')),
             'gripper_kp': float(s('gripper_kp')),
             'gripper_kd': float(s('gripper_kd')),
+            'gripper_torque_limit': float(s('gripper_torque_limit')),
             'source_name': s('source_name'),
             'control_mode': s('mode'),
             'control_rate_hz': float(s('control_rate_hz')),
@@ -184,6 +190,26 @@ def generate_launch_description():
         )
 
         nodes = [node]
+        if jm == 'arms_grippers':
+            # 仅在 mode:=arms_grippers 时拉起增量夹爪控制节点
+            nodes.append(Node(
+                package='lite_move_controller',
+                executable='gripper_node',
+                name='gripper_node',
+                output='screen',
+                parameters=[{
+                    'gripper_joints': ['left_gripper', 'right_gripper'],
+                    'lower_limits': [0.0, 0.0],
+                    'upper_limits': [float(s('gripper_open_limit')), float(s('gripper_open_limit'))],
+                    'default_stiffness': float(s('gripper_kp')),
+                    'default_damping': float(s('gripper_kd')),
+                    'publish_rate_hz': 50.0,
+                    'command_topic': '/gripper/command',
+                    'opening_topic': '/gripper/opening',
+                    'joint_states_topic': '/joint_states',
+                    'output_topic': '/lite_move_controller/gripper_command',
+                }],
+            ))
         if b('enable_ik_node'):
             ik_share = FindPackageShare('lite_ik_node').perform(context)
             ik_params = {
@@ -215,6 +241,7 @@ def generate_launch_description():
     return LaunchDescription([
         mode_arg, joint_mode_arg, source_arg, params_json_arg, urdf_arg,
         auto_enable_arg, rate_arg, enable_ik_node_arg, params_file_arg,
-        gripper_position_arg, gripper_kp_arg, gripper_kd_arg,
+        gripper_position_arg, gripper_kp_arg, gripper_kd_arg, gripper_torque_limit_arg,
+        gripper_open_limit_arg,
         OpaqueFunction(function=_build),
     ])

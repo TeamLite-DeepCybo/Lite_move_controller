@@ -118,7 +118,7 @@ def generate_launch_description():
     #    夹爪关节，节点会整段跳过并打一行 INFO）。
     gripper_position_arg = DeclareLaunchArgument(
         'gripper_position', default_value='0.0',
-        description='夹爪期望位置 [m]；0 = 完全夹到底（URDF 限位 [0, 0.047]）。')
+        description='已弃用的兼容参数；启动保持实测，运动请发 /gripper/command。')
     gripper_kp_arg = DeclareLaunchArgument(
         'gripper_kp', default_value='20.0',
         description='夹爪刚度 [N/m]（prismatic！）。')

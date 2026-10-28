@@ -183,6 +183,13 @@ target_link_libraries(test_filter_shape PRIVATE lite_move_controller_core)
 # 夹爪填充逻辑（纯函数，零 ROS）：14/16 关节模式、缺关节、帧长度不符、下标越界
 add_executable(test_gripper test/test_gripper.cpp)
 target_link_libraries(test_gripper PRIVATE lite_move_controller_core)
+add_executable(test_gripper_input test/test_gripper_input.cpp)
+target_link_libraries(test_gripper_input PRIVATE lite_move_controller_core)
+if(BUILD_TESTING)
+  enable_testing()
+  add_test(NAME gripper_frame COMMAND test_gripper)
+  add_test(NAME gripper_input COMMAND test_gripper_input)
+endif()
 
 # 动力学 + 雅可比集成测试（需要真实 URDF 与 schema2 的 params.json）
 add_executable(test_dynamics test/test_dynamics.cpp)

@@ -121,9 +121,20 @@ ros2 topic echo /lite_move_controller/status --once
 ros2 service call /lite_move_controller/enable std_srvs/srv/Trigger "{}"
 ```
 
-### 3. 夹爪独立控制接口（仅在 mode:=arms_grippers 下可用）
+### 3. 夹爪独立控制接口（运控 joint_mode:=arms_grippers）
 
 由 `gripper_node` 向上暴露 0~1 归一化输入（0.0 代表完全闭合，1.0 代表完全张开）：
+
+未收到实测状态或明确指令的夹爪不会发布目标；只初始化一侧时不会给另一侧补零。
+后续省略某侧就保持该侧已确认目标，显式 `0.0` 仍表示闭合。名称与 position
+必须一一对应；空请求、未知/重复名称、NaN/Inf、超出 0～1 的值会整条拒绝，
+不会部分更新或静默截断。内部米制话题也按实际 URDF 限位做整条校验。
+
+`MoveTarget.gripper` 已弃用：关节和位姿路径均忽略该旧字段；非零值会告警。
+请统一使用下面的话题。`gripper_position` 旧启动参数不作为开机运动指令；
+启动保持实测位置，需运动时显式发送指令。DCH 的米制目标需要按配置限位转换为
+归一化开度，不能把米值直接当 0～1 输入；也不要与 gripper_node 同时向内部
+`/lite_move_controller/gripper_command` 发布，避免两个来源互相覆盖。
 
 - **逐爪控制**：发布至 `/gripper/command`（`sensor_msgs/msg/JointState`）
   ```bash
@@ -301,3 +312,23 @@ ros2 launch lite_move_controller move_controller.launch.py \
 - `joint_mode`、桥的 canonical 关节集合和启动参数必须一致。
 - 更换机器人构型后必须同步更新 `Lite_IK_node` 的模型资产并重新执行 `lite_dyid`。
 - 启动测试前先确认桥当前数据源和控制模式；测试结束可调用 `disable` 退出接管。
+
+### 动态夹爪的离线回归
+
+先构建安装本包。以下测试只运行夹爪节点，所有话题改到测试命名空间，
+不加载主控制器、电机或 CAN；域 173 必须专用于本次离线测试。
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source install/local_setup.bash
+mkdir -p .local/log/gripper .local/experiments/gripper
+export ROS_DOMAIN_ID=173 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+export ROS_LOG_DIR="$PWD/.local/log/gripper/ros"
+python3 src/Lite_move_controller/lite_move_controller/test/gripper_node_smoke.py \
+  --executable install/lite_move_controller/lib/lite_move_controller/gripper_node \
+  --output .local/experiments/gripper/dds.json
+```
+
+`colcon test --packages-select lite_move_controller` 同时运行夹爪填帧与输入校验纯函数测试。
+DDS 回归覆盖无反馈启动、单侧初始化、显式零、独立目标、省略侧、非法批次、重启保持。
+通过仅证明离线软件行为；真实夹爪开合、跟踪和停止仍需人工验收。

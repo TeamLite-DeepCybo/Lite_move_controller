@@ -32,6 +32,9 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <stdexcept>
+
+#include "lite_move_controller/gripper_input.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
@@ -69,11 +72,12 @@ public:
     const std::string out_topic = get_parameter("output_topic").as_string();
 
     const std::size_t num_joints = gripper_joints_.size();
-    if (lower_limits_.size() < num_joints) {
-      lower_limits_.resize(num_joints, 0.0);
+    std::string error;
+    if (!validateGripperConfiguration(gripper_joints_, lower_limits_, upper_limits_, error)) {
+      throw std::invalid_argument("invalid gripper configuration: " + error);
     }
-    if (upper_limits_.size() < num_joints) {
-      upper_limits_.resize(num_joints, 0.047);
+    if (!std::isfinite(rate_hz) || rate_hz <= 0.0) {
+      throw std::invalid_argument("publish_rate_hz must be finite and positive");
     }
 
     target_positions_.assign(num_joints, 0.0);
@@ -106,7 +110,7 @@ public:
         onGripperOpening(msg);
       });
 
-    const auto period = std::chrono::duration<double>(1.0 / std::max(1.0, rate_hz));
+    const auto period = std::chrono::duration<double>(1.0 / rate_hz);
     timer_ = create_wall_timer(
       std::chrono::duration_cast<std::chrono::nanoseconds>(period),
       [this]() { publishLoop(); });
@@ -144,33 +148,33 @@ private:
   void onGripperCommand(const sensor_msgs::msg::JointState::SharedPtr msg)
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::size_t> indices;
+    std::string error;
+    const std::vector<double> lower(gripper_joints_.size(), 0.0);
+    const std::vector<double> upper(gripper_joints_.size(), 1.0);
+    if (!validateGripperBatch(msg->name, msg->position, gripper_joints_, lower, upper,
+                             indices, error)) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                           "拒绝整条夹爪指令（目标保持不变）：%s", error.c_str());
+      return;
+    }
     for (std::size_t k = 0; k < msg->name.size(); ++k) {
-      if (k >= msg->position.size()) {break;}
-      const auto & name = msg->name[k];
+      const auto i = indices[k];
       const double u = msg->position[k];
-      if (!std::isfinite(u)) {continue;}
-
-      for (std::size_t i = 0; i < gripper_joints_.size(); ++i) {
-        if (gripper_joints_[i] == name) {
-          const double u_clamped = std::clamp(u, 0.0, 1.0);
-          const double pos_m =
-            lower_limits_[i] + u_clamped * (upper_limits_[i] - lower_limits_[i]);
-          target_positions_[i] = pos_m;
-          target_initialized_[i] = true;
-          RCLCPP_DEBUG(get_logger(),
-                       "更新夹爪 '%s' 目标：归一化 %.2f -> 物理 %.4f m",
-                       name.c_str(), u_clamped, pos_m);
-          break;
-        }
-      }
+      target_positions_[i] = lower_limits_[i] + u * (upper_limits_[i] - lower_limits_[i]);
+      target_initialized_[i] = true;
     }
   }
 
   void onGripperOpening(const std_msgs::msg::Float64::SharedPtr msg)
   {
-    if (!std::isfinite(msg->data)) {return;}
+    if (!std::isfinite(msg->data) || msg->data < 0.0 || msg->data > 1.0) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                           "拒绝双爪开度：必须为 0..1 有限值（目标保持不变）");
+      return;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
-    const double u_clamped = std::clamp(msg->data, 0.0, 1.0);
+    const double u_clamped = msg->data;
     for (std::size_t i = 0; i < gripper_joints_.size(); ++i) {
       const double pos_m =
         lower_limits_[i] + u_clamped * (upper_limits_[i] - lower_limits_[i]);
@@ -186,10 +190,14 @@ private:
     std::lock_guard<std::mutex> lock(mutex_);
     sensor_msgs::msg::JointState out;
     out.header.stamp = now();
-    out.name = gripper_joints_;
-    out.position = target_positions_;
-    out.velocity.assign(gripper_joints_.size(), 0.0);
-    out.effort.assign(gripper_joints_.size(), 0.0);
+    for (std::size_t i = 0; i < gripper_joints_.size(); ++i) {
+      if (!target_initialized_[i]) {continue;}
+      out.name.push_back(gripper_joints_[i]);
+      out.position.push_back(target_positions_[i]);
+    }
+    if (out.name.empty()) {return;}
+    out.velocity.assign(out.name.size(), 0.0);
+    out.effort.assign(out.name.size(), 0.0);
     pub_gripper_cmd_->publish(out);
   }
 

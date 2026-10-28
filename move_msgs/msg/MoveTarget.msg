@@ -84,11 +84,10 @@ float64[] wrench_feedforward
 
 # --- 夹爪 -------------------------------------------------------------------
 #
-# `left_gripper` / `right_gripper` 的开合程度（m，prismatic）。
-# ⚠️ 允许为空（默认）或 0 —— 当前辨识**没有包含夹爪**
-#    （`include_grippers: false`），所以运控层不会给夹爪做动力学补偿，
-#    只会把该值直接写进下发命令的对应关节。
-# `mode:=arms`（14 关节）下夹爪根本不在关节集合里，本字段被忽略。
+# DEPRECATED: retained for wire compatibility; ignored in joint AND pose paths.
+# Use /gripper/command (JointState, normalized 0..1) for independent grippers.
+# This scalar cannot distinguish omitted from explicit zero. Do not use it as
+# a command; explicit zero on the NEW named topic remains a valid close target.
 float64 gripper
 
 # 本帧有效期（毫秒）。0 = 用运控层的默认值。

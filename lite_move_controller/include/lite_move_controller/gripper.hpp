@@ -10,9 +10,9 @@
 // 用户场景：夹爪夹着一支笔，"对期望位置 0 做阻抗控制"（0 = 完全夹到底），
 // 然后手臂去画圆。夹爪**不是** IK 链的一部分（到 `*_gripper_tip_middle_link`
 // 的链只有 7 个 revolute），也**不参与**动力学（辨识参数里没有它），所以它
-// 在控制帧里只是一段"固定命令"：
+// 在控制帧里是一段左右独立、持续保持的命令：
 //
-//     position = gripper_position（默认 0）
+//     position = 最新独立目标（未指定时保持；初次来自实测）
 //     velocity = 0, effort = 0
 //     kp = gripper_kp（N/m）, kd = gripper_kd（N·s/m）
 //

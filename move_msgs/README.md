@@ -18,3 +18,7 @@
 ```bash
 colcon build --packages-select move_msgs
 ```
+
+`MoveTarget.gripper` 为兼容保留的弃用字段，关节和位姿路径都不消费它。
+夹爪请使用 `/gripper/command`（JointState，按名称指定 0～1 开度）；
+该新接口的显式 0 表示闭合，省略侧保持目标。

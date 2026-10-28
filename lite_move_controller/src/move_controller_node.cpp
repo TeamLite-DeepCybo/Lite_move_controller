@@ -66,6 +66,7 @@
 #include "lite_ik_node/ik_backend.hpp"
 #include "lite_ik_node/ik_kdl.hpp"
 #include "lite_move_controller/gripper.hpp"
+#include "lite_move_controller/gripper_input.hpp"
 #include "lite_ik_node/ik_moveit.hpp"
 #include "lite_move_controller/input_filter.hpp"
 #include "lite_move_controller/limit_guard.hpp"
@@ -314,7 +315,7 @@ private:
     // ---- 夹爪（prismatic）阻抗夹持 ----------------------------------------
     // 用户场景：夹爪夹着一支笔，对**期望位置 0**（= 完全夹到底）做阻抗控制，
     // 然后手臂去画圆。夹爪**不在 IK 链里**（到 *_gripper_tip_middle_link 的链
-    // 只有 7 个 revolute），也**不参与**动力学，所以在控制帧里它只是一段固定
+    // 只有 7 个 revolute），也**不参与**动力学，所以在控制帧里它是左右独立的动态
     // 命令（见 gripper.hpp）。
     //
     // ⚠️ 默认值 = 两只夹爪的名字；14 关节模式下 canonical 里根本没有它们
@@ -469,6 +470,9 @@ private:
     {
       std::vector<std::string> missing;
       gripper_idx_ = gripperIndices(canonical_joints_, gripper_joints_, &missing);
+      // Keep names and command slots aligned even if only one gripper is present.
+      gripper_joints_.clear();
+      for (const auto k : gripper_idx_) {gripper_joints_.push_back(canonical_joints_[k]);}
       if (gripper_idx_.empty()) {
         RCLCPP_INFO(get_logger(),
                     "canonical(%zu) 里没有夹爪关节 → **不做夹爪控制**（14 关节模式的旧行为）",
@@ -670,19 +674,25 @@ private:
           gripper_command_topic_, rclcpp::QoS(10).reliable(),
           [this](const sensor_msgs::msg::JointState::SharedPtr m) {
             std::lock_guard<std::mutex> lock(gripper_cmd_mtx_);
+            const auto & limits = guard_.limits();
+            std::vector<double> lower, upper;
+            for (const auto k : gripper_idx_) {
+              if (k >= limits.position_min.size() || k >= limits.position_max.size()) {return;}
+              lower.push_back(limits.position_min[k]);
+              upper.push_back(limits.position_max[k]);
+            }
+            std::vector<std::size_t> indices;
+            std::string error;
+            if (!validateGripperBatch(m->name, m->position, gripper_joints_, lower, upper,
+                                     indices, error)) {
+              RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
+                                   "拒绝整条米制夹爪指令（目标保持不变）：%s", error.c_str());
+              return;
+            }
             for (std::size_t k = 0; k < m->name.size(); ++k) {
-              if (k >= m->position.size()) {break;}
-              const auto & name = m->name[k];
-              for (std::size_t i = 0; i < gripper_joints_.size(); ++i) {
-                if (gripper_joints_[i] == name && i < gripper_cmds_.size()) {
-                  const double pos = m->position[k];
-                  if (std::isfinite(pos)) {
-                    gripper_cmds_[i].position = pos;
-                    gripper_pos_initialized_[i] = true;
-                  }
-                  break;
-                }
-              }
+              const auto i = indices[k];
+              gripper_cmds_[i].position = m->position[k];
+              gripper_pos_initialized_[i] = true;
             }
           });
     }
@@ -1384,6 +1394,10 @@ private:
   {
     const std::int64_t now = steadyNowMs();
     for (const auto & t : msg->targets) {
+      if (t.gripper != 0.0) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                             "MoveTarget.gripper 已弃用并忽略；请使用 /gripper/command");
+      }
       const std::string arm_name = t.arm;
       ArmRuntime * arm = findArm(arm_name);
       if (arm == nullptr) {
@@ -1969,8 +1983,8 @@ private:
     // ---- 夹爪：阻抗夹持（**不参与 IK / 动力学**）-------------------------
     // 用户场景：夹住一支笔，对期望位置 0（= 夹到底）做阻抗控制，手臂去画圆。
     // ⚠️ 夹爪不是 IK 链的一部分（链只有 7 个 revolute），也不在辨识的动力学
-    //    模型里，所以它只是"帧里的一段固定命令"：
-    //      position=gripper_position, velocity=0, effort=0, kp=gripper_kp, kd=gripper_kd
+    //    模型里，所以它是"帧里的独立保持命令"：
+    //      position=最新独立目标（初次来自实测）, velocity=0, effort=0, kp=gripper_kp, kd=gripper_kd
     //    `effort=0` 是刻意的：夹持力由 kp·(0 − 实测位置) 产生，再由 limit_guard
     //    的 torque_max（≤ URDF effort=1 N）限幅 —— 不额外叠前馈力。
     // ⚠️ 必须放在 limit_guard 之前、且在两臂 IK 之后：夹爪不参与 IK，但它和

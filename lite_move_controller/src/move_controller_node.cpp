@@ -1848,9 +1848,11 @@ private:
     StateInputs in;
     in.now_ms = now_fresh;
     in.load_ok = !arms_.empty();
-    in.enable_requested = enable_requested_;
-    in.disable_requested = disable_requested_;
-    in.clear_fault_requested = clear_fault_requested_;
+    // Consume each request atomically. A service arriving after this snapshot
+    // belongs to the next tick and must not be erased by a later store(false).
+    in.enable_requested = enable_requested_.exchange(false);
+    in.disable_requested = disable_requested_.exchange(false);
+    in.clear_fault_requested = clear_fault_requested_.exchange(false);
     in.state_fresh = bridge_ && bridge_->stateReady() && state_age_ms >= 0 &&
                      state_age_ms <= static_cast<std::int64_t>(state_timeout_ms_);
     in.target_fresh = anyTargetFresh(now_fresh);
@@ -1881,11 +1883,8 @@ private:
                            static_cast<int>(bridge_ != nullptr && bridge_->stateReady()),
                            static_cast<long long>(maxTargetAgeMs(now_fresh)), target_timeout_ms_);
     }
-    const bool was_disable = static_cast<bool>(disable_requested_);
+    const bool was_disable = in.disable_requested;
     const StateActions act = sm_.tick(in);
-    enable_requested_ = false;
-    disable_requested_ = false;
-    clear_fault_requested_ = false;
     // ⚠️⚠️ **接管/交权/故障时复位各臂运行时**（本轮最关键的修复）：
     //    否则 HOLD→TRACKING 的第一拍会沿用**上一次运行**的 filter 目标 /
     //    q_last / 插值段，把旧目标当成当前目标下发 —— 表现就是"一切 HOLD 就

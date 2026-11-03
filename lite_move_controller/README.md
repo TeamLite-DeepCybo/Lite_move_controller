@@ -143,12 +143,12 @@ ros2 service call /lite_move_controller/enable std_srvs/srv/Trigger "{}"
 
 ```bash
 # 标准启动：16 轴阻抗控制 + 动力学前馈 + 夹爪 10s 三态循环
-bash src/lite_move_controller/scripts/run_circle_square.sh
+bash src/Lite_move_controller/lite_move_controller/scripts/run_circle_square.sh
 
 # 环境变量微调示例：
-DURATION=60 SPEED=0.04 bash src/lite_move_controller/scripts/run_circle_square.sh   # 运行 60s，线速度 0.04 m/s
-PLANE=horizontal bash src/lite_move_controller/scripts/run_circle_square.sh         # 在 X-Y 水平桌面绘制
-ENABLE_GRIPPER=0 bash src/lite_move_controller/scripts/run_circle_square.sh         # 禁用夹爪开闭示范（仅纯臂绘制）
+DURATION=600 SPEED=0.1 bash src/Lite_move_controller/lite_move_controller/scripts/run_circle_square.sh   # 运行 60s，线速度 0.04 m/s
+PLANE=horizontal bash src/Lite_move_controller/lite_move_controller/scripts/run_circle_square.sh         # 在 X-Y 水平桌面绘制
+ENABLE_GRIPPER=0 bash src/Lite_move_controller/lite_move_controller/scripts/run_circle_square.sh         # 禁用夹爪开闭示范（仅纯臂绘制）
 ```
 
 ---
@@ -180,12 +180,12 @@ ros2 launch lite_bringup lite_bringup.launch.py \
 
 **终端 2：运行一键测试脚本**
 ```bash
-bash src/lite_move_controller/scripts/run_circle_square.sh
+bash src/Lite_move_controller/lite_move_controller/scripts/run_circle_square.sh
 ```
 
 如需直接调用底层 Python 驱动脚本进行高度定制化测试：
 ```bash
-python3 src/lite_move_controller/scripts/run_circle_square.py \
+python3 src/Lite_move_controller/lite_move_controller/scripts/run_circle_square.py \
     --prepose-sec 8.0 \
     --duration 200.0 \
     --speed 0.05 \

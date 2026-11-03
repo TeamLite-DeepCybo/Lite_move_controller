@@ -28,7 +28,20 @@ def main() -> int:
     urdf_path, params_path, dump_exe = sys.argv[1], sys.argv[2], sys.argv[3]
     N = int(sys.argv[4]) if len(sys.argv) > 4 else 200
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "lite_dyid"))
+    found_dyid = False
+    for p in Path(__file__).resolve().parents:
+        cand = p / "lite_dyid"
+        if cand.is_dir():
+            sys.path.insert(0, str(cand))
+            found_dyid = True
+            break
+        cand_src = p / "src" / "lite_dyid"
+        if cand_src.is_dir():
+            sys.path.insert(0, str(cand_src))
+            found_dyid = True
+            break
+    if not found_dyid:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "lite_dyid"))
     import pinocchio as pin
     from lite_dyid.identify import load_params
     from lite_dyid.model import RobotModel

@@ -461,18 +461,33 @@ def publish_to_ros(urdf_path, scenarios_data, rviz_config_path=None, auto_rviz=F
         rclpy.shutdown()
 
 if __name__ == '__main__':
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    pkg_dir = os.path.dirname(script_dir)
+    cand_ws_4 = os.path.abspath(os.path.join(script_dir, '../../../..'))
+    cand_ws_3 = os.path.abspath(os.path.join(script_dir, '../../..'))
+    ws = cand_ws_4 if os.path.isdir(os.path.join(cand_ws_4, 'src')) else cand_ws_3
+
+    urdf_candidates = [
+        os.path.join(ws, "src/Lite_IK_node/config/model/lite_000_asm.urdf"),
+        os.path.join(ws, "src/lite_ik_node/config/model/lite_000_asm.urdf"),
+        os.path.join(ws, "src/lite_motor_controller/lite_description/urdf/lite_000_asm.urdf"),
+    ]
+    default_urdf = next((u for u in urdf_candidates if os.path.exists(u)), urdf_candidates[0])
+    default_gif = os.path.join(script_dir, "lite_ik_trajectory_demo.gif")
+    default_rviz = os.path.join(pkg_dir, "config/trajectory_view.rviz")
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--publish-ros", action="store_true", help="循环发布 /joint_states 与 Marker 到 ROS 2")
     parser.add_argument("--launch-rviz", action="store_true", help="同时自动拉起 RViz 窗口")
-    parser.add_argument("--urdf", default="src/lite_ik_node/config/model/lite_000_asm.urdf",
+    parser.add_argument("--urdf", default=default_urdf,
                         help="用于验证的 URDF 路径")
     parser.add_argument("--gif-out",
-                        default="src/lite_move_controller/scripts/lite_ik_trajectory_demo.gif",
+                        default=default_gif,
                         help="生成的 GIF 路径")
     parser.add_argument("--artifact-gif", default="",
                         help="可选：额外复制一份 GIF 到该路径")
     parser.add_argument("--rviz-config",
-                        default="src/lite_move_controller/config/trajectory_view.rviz",
+                        default=default_rviz,
                         help="RViz 配置路径")
     args = parser.parse_args()
 

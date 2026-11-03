@@ -17,16 +17,22 @@ namespace lite_move_controller
 namespace
 {
 
-/// 从 `path` 向上最多 6 层找 `src/lite_controller/config/gravity/inertia_params.yaml`。
+/// 从 `path` 向上最多 6 层找 `inertia_params.yaml`。
 std::string findInSourceTree(const std::filesystem::path & start)
 {
   std::error_code ec;
   std::filesystem::path p = std::filesystem::absolute(start, ec);
   if (ec) {return {};}
   for (int i = 0; i < 6; ++i) {
-    const auto cand = p / "src" / "lite_controller" / "config" / "gravity" /
-                      "inertia_params.yaml";
-    if (std::filesystem::exists(cand, ec) && !ec) {return cand.string();}
+    const std::vector<std::filesystem::path> cands = {
+      p / "src" / "lite_motor_controller" / "lite_controller" / "config" / "gravity" / "inertia_params.yaml",
+      p / "src" / "lite_controller" / "config" / "gravity" / "inertia_params.yaml",
+      p / "lite_motor_controller" / "lite_controller" / "config" / "gravity" / "inertia_params.yaml",
+      p / "lite_controller" / "config" / "gravity" / "inertia_params.yaml"
+    };
+    for (const auto & cand : cands) {
+      if (std::filesystem::exists(cand, ec) && !ec) {return cand.string();}
+    }
     if (!p.has_parent_path() || p.parent_path() == p) {break;}
     p = p.parent_path();
   }
@@ -172,6 +178,7 @@ std::string resolveGravityYaml(const std::string & explicit_path,
       tried.push_back(found);
       return found;
     }
+    tried.push_back((s / "src/lite_motor_controller/lite_controller/config/gravity/inertia_params.yaml").string());
     tried.push_back((s / "src/lite_controller/config/gravity/inertia_params.yaml").string());
   }
   return {};

@@ -1171,6 +1171,7 @@ private:
       if (!prefix.empty()) {
         candidates.push_back(prefix + "/share/lite_move_controller/" + raw_params_json);
       }
+      candidates.push_back("src/Lite_move_controller/lite_move_controller/" + raw_params_json);
       candidates.push_back("src/lite_move_controller/" + raw_params_json);
       for (const auto & c : candidates) {
         if (std::filesystem::exists(c)) {
@@ -1339,6 +1340,7 @@ private:
       cands.push_back(prefix + "/share/lite_ik_node/config/kinematics.yaml");
     }
     // 源码树回退
+    cands.push_back("src/Lite_IK_node/config/kinematics.yaml");
     cands.push_back("src/lite_ik_node/config/kinematics.yaml");
     for (const auto & c : cands) {
       std::ifstream f(c);
@@ -2462,7 +2464,12 @@ private:
     if (arm.joint_target.size() != nj) {return true;}
     if (arm.joint_target_ms == 0 ||
         now - arm.joint_target_ms > static_cast<std::int64_t>(target_timeout_ms_)) {
-      return true;   // 关节目标陈旧：保持实测，不沿用旧目标
+      if (snap.covers(canonical_joints_.size())) {
+        arm.q_last.assign(snap.position.begin() + static_cast<long>(arm.offset),
+                          snap.position.begin() + static_cast<long>(arm.offset + nj));
+      }
+      arm.seg_active = false;
+      return true;   // 关节目标陈旧：保持实测，不沿用旧目标，并同步基准为当前实测
     }
     // 目标变化（或首次）→ 起新段；同一目标重复到达不重起
     bool restart = !arm.seg_active || arm.joint_active.size() != nj;
@@ -2522,18 +2529,18 @@ private:
         arm.seg_active = false;
       }
     }
-    // 步长/超前限制（与位姿模式同一套保险）
-    for (std::size_t k = 0; k < nj; ++k) {
-      double dq = q_cmd[k] - arm.q_last[k];
-      const double lim = std::max(-max_joint_step_, std::min(max_joint_step_, dq));
-      if (lim != dq) {q_cmd[k] = arm.q_last[k] + lim; v_cmd[k] = 0.0;}
-    }
+    // 步长/超前限制（先限制超前实测，最后严格由最大单步步长把关，杜绝突跳）
     if (max_lead_rad_ > 0.0 && snap.covers(canonical_joints_.size())) {
       for (std::size_t k = 0; k < nj; ++k) {
         const double qm = snap.position[arm.offset + k];
         if (q_cmd[k] < qm - max_lead_rad_) {q_cmd[k] = qm - max_lead_rad_; v_cmd[k] = 0.0;}
         else if (q_cmd[k] > qm + max_lead_rad_) {q_cmd[k] = qm + max_lead_rad_; v_cmd[k] = 0.0;}
       }
+    }
+    for (std::size_t k = 0; k < nj; ++k) {
+      double dq = q_cmd[k] - arm.q_last[k];
+      const double lim = std::max(-max_joint_step_, std::min(max_joint_step_, dq));
+      if (lim != dq) {q_cmd[k] = arm.q_last[k] + lim; v_cmd[k] = 0.0;}
     }
     for (std::size_t k = 0; k < nj; ++k) {
       frame.position[arm.offset + k] = q_cmd[k];
@@ -2752,14 +2759,6 @@ private:
         arm.seg_active = false;
       }
     }
-    for (std::size_t k = 0; k < nj; ++k) {
-      double dq = q_cmd[k] - arm.q_last[k];
-      const double dq_limited = std::max(-max_joint_step_, std::min(max_joint_step_, dq));
-      if (dq_limited != dq) {
-        q_cmd[k] = arm.q_last[k] + dq_limited;
-        v_cmd[k] = 0.0;   // 被步长钳住时不要同时声称一个大速度
-      }
-    }
     if (max_lead_rad_ > 0.0 && snap.covers(canonical_joints_.size())) {
       for (std::size_t k = 0; k < nj; ++k) {
         const double qm = snap.position[arm.offset + k];
@@ -2770,6 +2769,14 @@ private:
         } else if (q_cmd[k] > hi) {
           q_cmd[k] = hi; v_cmd[k] = 0.0; ++lead_clamped_;
         }
+      }
+    }
+    for (std::size_t k = 0; k < nj; ++k) {
+      double dq = q_cmd[k] - arm.q_last[k];
+      const double dq_limited = std::max(-max_joint_step_, std::min(max_joint_step_, dq));
+      if (dq_limited != dq) {
+        q_cmd[k] = arm.q_last[k] + dq_limited;
+        v_cmd[k] = 0.0;   // 被步长钳住时不要同时声称一个大速度
       }
     }
     for (std::size_t k = 0; k < nj; ++k) {

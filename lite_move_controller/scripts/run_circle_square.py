@@ -234,13 +234,24 @@ def print_and_save_stats(records, output_csv, plane_name, dist_sym, circle_d, sq
         print(f"⚠️ 保存 CSV 统计数据失败: {ex}")
 
 def main():
-    ws_default = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..'))
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    cand_ws_4 = os.path.abspath(os.path.join(script_dir, '../../../..'))
+    cand_ws_3 = os.path.abspath(os.path.join(script_dir, '../../..'))
+    if os.path.isdir(os.path.join(cand_ws_4, 'src')):
+        ws_default = cand_ws_4
+    elif os.path.isdir(os.path.join(cand_ws_3, 'src')):
+        ws_default = cand_ws_3
+    else:
+        ws_default = cand_ws_4
     ws = os.environ.get('WS', ws_default)
 
     # 本地 tmp 路径安全回退
     candidate_urdfs = [
         os.path.join(ws, 'tmp/dyid_runs/run_20261019_234605/robot.urdf'),
+        os.path.join(ws, 'src/tmp/dyid_runs/run_20261019_234605/robot.urdf'),
+        os.path.join(ws, 'src/Lite_IK_node/config/model/lite_000_asm.urdf'),
         os.path.join(ws, 'src/lite_ik_node/config/model/lite_000_asm.urdf'),
+        os.path.join(ws, 'src/lite_motor_controller/lite_description/urdf/lite_000_asm.urdf'),
         os.path.join(ws, 'src/lite_description/urdf/lite_000_asm.urdf')
     ]
     default_urdf = next((u for u in candidate_urdfs if os.path.exists(u)), candidate_urdfs[0])

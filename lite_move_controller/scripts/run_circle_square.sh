@@ -6,7 +6,7 @@
 #       control_mode:=mit source_names:=lite_move_controller
 #
 # 用法：
-#   bash src/lite_move_controller/scripts/run_circle_square.sh
+#   bash src/Lite_move_controller/lite_move_controller/scripts/run_circle_square.sh
 #   DURATION=60 bash ...        # 短跑
 #   SPEED=0.05 bash ...         # 更慢
 #
@@ -15,7 +15,16 @@
 # ⚠️ ROS 的 setup.bash 会引用未定义变量（AMENT_TRACE_SETUP_FILES 等），
 #    在 `set -u` 下 sourcing 会直接报 "未绑定的变量"。所以 source 期间关掉 nounset。
 set -eo pipefail
-WS=${WS:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [[ -z "${WS:-}" ]]; then
+  if [[ -d "${SCRIPT_DIR}/../../../../src" ]]; then
+    WS=$(cd "${SCRIPT_DIR}/../../../.." && pwd)
+  elif [[ -d "${SCRIPT_DIR}/../../../src" ]]; then
+    WS=$(cd "${SCRIPT_DIR}/../../.." && pwd)
+  else
+    WS=$(cd "${SCRIPT_DIR}/../../../.." && pwd)
+  fi
+fi
 set +u
 source /opt/ros/jazzy/setup.bash
 source "${WS}/install/setup.bash"
@@ -26,8 +35,9 @@ SPEED=${SPEED:-0.05}
 PREPOSE=${PREPOSE:-8}
 PLANE=${PLANE:-vertical}
 DIST_SYM=${DIST_SYM:-0.20}
-PARAMS=${PARAMS:-${WS}/src/lite_move_controller/config/impedance_test_200s.yaml}
+PARAMS=${PARAMS:-${SCRIPT_DIR}/../config/impedance_test_200s.yaml}
 STATS_FILE=${STATS_FILE:-${WS}/tmp/circle_square_tracking_stats.csv}
+mkdir -p "$(dirname "${STATS_FILE}")"
 
 echo "[1/4] 检查 bringup / 数据源授权 / 重复实例"
 # ⚠️ 两套 bringup 会在同一条 CAN 上互相抢控制器（实测：HOLD↔ZERO_TORQUE 每秒
@@ -116,11 +126,26 @@ if [[ "${ENABLE_GRIPPER:-1}" == "0" ]]; then
   GRIPPER_ARG="--no-gripper"
 fi
 trap 'timeout 10 ros2 service call /lite_move_controller/disable std_srvs/srv/Trigger "{}" >/dev/null 2>&1 || true' EXIT
-/usr/bin/python3 "${WS}/src/lite_move_controller/scripts/run_circle_square.py" \
+if [[ -z "${URDF_PATH:-}" ]]; then
+  for cand in \
+    "${WS}/tmp/dyid_runs/run_20261019_234605/robot.urdf" \
+    "${WS}/src/tmp/dyid_runs/run_20261019_234605/robot.urdf" \
+    "${WS}/src/Lite_IK_node/config/model/lite_000_asm.urdf" \
+    "${WS}/src/lite_ik_node/config/model/lite_000_asm.urdf" \
+    "${WS}/src/lite_motor_controller/lite_description/urdf/lite_000_asm.urdf"; do
+    if [[ -f "${cand}" ]]; then
+      URDF_PATH="${cand}"
+      break
+    fi
+  done
+fi
+
+PYTHON_BIN=${PYTHON_BIN:-/usr/bin/python3}
+"${PYTHON_BIN}" "${SCRIPT_DIR}/run_circle_square.py" \
   --prepose-sec "${PREPOSE}" --duration "${DURATION}" --speed "${SPEED}" \
   --circle-d 0.12 --square-side 0.08 \
   --dist-sym "${DIST_SYM}" --plane "${PLANE}" \
-  --urdf "${WS}/tmp/dyid_runs/run_20261019_234605/robot.urdf" \
+  ${URDF_PATH:+--urdf "${URDF_PATH}"} \
   --stats-file "${STATS_FILE}" ${GRIPPER_ARG}
 
 echo "完成：控制器回到 STANDBY；桥会 SAFE_HOLD 顶住最后目标（HOLD 会漂移，属正常）"

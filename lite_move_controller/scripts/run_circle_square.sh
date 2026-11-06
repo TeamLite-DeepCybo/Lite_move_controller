@@ -79,9 +79,9 @@ if [[ "${STATUS}" != *"lite_move_controller"* ]]; then
 fi
 
 echo "[2/4] 起 move_controller 与 lite_ik_node 微分逆解节点（若未在跑）"
-if ! ros2 node list 2>/dev/null | grep -qx '/lite_move_controller' || \
-   ! ros2 node list 2>/dev/null | grep -qx '/lite_ik_node' || \
-   ([[ "${JOINT_MODE}" == "arms_grippers" ]] && ! ros2 node list 2>/dev/null | grep -qx '/gripper_node'); then
+if ! ros2 node list 2>/dev/null | grep -x '/lite_move_controller' || \
+   ! ros2 node list 2>/dev/null | grep -x '/lite_ik_node' || \
+   ([[ "${JOINT_MODE}" == "arms_grippers" ]] && ! ros2 node list 2>/dev/null | grep -x '/gripper_node'); then
   # 若有孤立旧实例在跑，先杀掉以彻底杜绝单节点旧实例抢占话题或丢失外部 IK
   pkill -f "move_controller_node" 2>/dev/null || true
   pkill -f "lite_ik_node" 2>/dev/null || true
@@ -91,9 +91,9 @@ if ! ros2 node list 2>/dev/null | grep -qx '/lite_move_controller' || \
   ros2 launch lite_move_controller move_controller.launch.py mode:=impedance \
     joint_mode:="${JOINT_MODE}" enable_ik_node:=true params_file:="${PARAMS}" > "${WS}/log/lmc_test_controller.log" 2>&1 &
   for _ in $(seq 1 40); do
-    if ros2 node list 2>/dev/null | grep -qx '/lite_move_controller' && \
-       ros2 node list 2>/dev/null | grep -qx '/lite_ik_node'; then
-      if [[ "${JOINT_MODE}" == "arms_grippers" ]] && ! ros2 node list 2>/dev/null | grep -qx '/gripper_node'; then
+    if ros2 node list 2>/dev/null | grep -x '/lite_move_controller' && \
+       ros2 node list 2>/dev/null | grep -x '/lite_ik_node'; then
+      if [[ "${JOINT_MODE}" == "arms_grippers" ]] && ! ros2 node list 2>/dev/null | grep -x '/gripper_node'; then
         sleep 0.2
         continue
       fi
@@ -101,9 +101,9 @@ if ! ros2 node list 2>/dev/null | grep -qx '/lite_move_controller' || \
     fi
     sleep 0.5
   done
-  if ! ros2 node list 2>/dev/null | grep -qx '/lite_move_controller' || \
-     ! ros2 node list 2>/dev/null | grep -qx '/lite_ik_node' || \
-     ([[ "${JOINT_MODE}" == "arms_grippers" ]] && ! ros2 node list 2>/dev/null | grep -qx '/gripper_node'); then
+  if ! ros2 node list 2>/dev/null | grep -x '/lite_move_controller' || \
+     ! ros2 node list 2>/dev/null | grep -x '/lite_ik_node' || \
+     ([[ "${JOINT_MODE}" == "arms_grippers" ]] && ! ros2 node list 2>/dev/null | grep -x '/gripper_node'); then
     echo "✗ 节点未能成功启动，请检查日志：${WS}/log/lmc_test_controller.log"
     tail -n 25 "${WS}/log/lmc_test_controller.log" 2>/dev/null || true
     exit 1

@@ -145,6 +145,7 @@ struct ArmRuntime
   std::vector<double> joint_target;      ///< 最近收到的关节目标
   std::vector<double> joint_active;      ///< 当前段正在走的关节目标
   std::int64_t joint_target_ms{0};       ///< 收到时刻（超时判据）
+  double target_timeout_ms{200.0};       ///< 本臂目标的有效超时（ms），与配置取 min
   /// 复位后第一帧是否已打印过"首帧 = 实测"的证据（每次接管只打一次）。
   bool first_cmd_logged{false};
   /// 上一拍**实际下发**的关节角（节点侧逐拍步长统计用；不受订阅端丢帧影响）。
@@ -291,10 +292,10 @@ private:
     declare_parameter<std::string>("source_name", "lite_move_controller");
     declare_parameter<std::string>("command_topic", "/lite_bridge/motion_command");
     declare_parameter<std::string>("joint_states_topic", "/joint_states");
-    declare_parameter<std::vector<std::string>>("canonical_joints", {});
-    declare_parameter<std::vector<std::string>>("arm_names", {"left", "right"});
-    declare_parameter<std::vector<std::string>>("joints_left", {});
-    declare_parameter<std::vector<std::string>>("joints_right", {});
+    declare_parameter<std::vector<std::string>>("canonical_joints", std::vector<std::string>{});
+    declare_parameter<std::vector<std::string>>("arm_names", std::vector<std::string>{"left", "right"});
+    declare_parameter<std::vector<std::string>>("joints_left", std::vector<std::string>{});
+    declare_parameter<std::vector<std::string>>("joints_right", std::vector<std::string>{});
     declare_parameter<std::string>("root_link", "world_root");
     declare_parameter<std::string>("frame_id", "world_root");
     declare_parameter<std::string>("tip_link_left", "left_gripper_tip_middle_link");
@@ -887,6 +888,7 @@ private:
     arm.name = name;
     arm.joints = joints;
     arm.offset = offset;
+    arm.target_timeout_ms = target_timeout_ms_;
     arm.q_seed.assign(joints.size(), 0.0);
     arm.q_last.assign(joints.size(), 0.0);
 
@@ -1400,6 +1402,22 @@ private:
                              arm_name.c_str(), t.frame_id.c_str(), frame_id_.c_str());
         continue;
       }
+      if (!t.wrench_feedforward.empty()) {
+        bool non_zero_wrench = false;
+        for (double w : t.wrench_feedforward) {
+          if (std::fabs(w) > 1e-6) {
+            non_zero_wrench = true;
+            break;
+          }
+        }
+        if (non_zero_wrench) {
+          RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                               "臂 '%s' 传入了前馈外力 wrench_feedforward，但本机无 F/T，前馈外力被忽略",
+                               arm_name.c_str());
+        }
+      }
+      arm->target_timeout_ms = (t.timeout_ms > 0.0) ?
+          std::min(t.timeout_ms, target_timeout_ms_) : target_timeout_ms_;
       // ---- 关节模式：预摆位/回位，不走 IK --------------------------------
       if (t.target_type == move_msgs::msg::MoveTarget::TARGET_JOINTS) {
         const std::size_t nj = arm->joints.size();
@@ -1781,7 +1799,7 @@ private:
                            "stateReady=%d、目标年龄 %lld ms（阈值 %.0f ms）",
                            static_cast<long long>(state_age_ms), state_timeout_ms_,
                            static_cast<int>(bridge_ != nullptr && bridge_->stateReady()),
-                           static_cast<long long>(maxTargetAgeMs(now_fresh)), target_timeout_ms_);
+                           static_cast<long long>(maxTargetAgeMs(now_fresh)), effectiveTargetTimeoutMs());
     }
     const bool was_disable = static_cast<bool>(disable_requested_);
     const StateActions act = sm_.tick(in);
@@ -1890,10 +1908,39 @@ private:
     return worst;
   }
 
+  double effectiveTargetTimeoutMs() const
+  {
+    std::lock_guard<std::mutex> arm_lock(arm_state_mtx_);
+    double min_t = target_timeout_ms_;
+    for (const auto & a : arms_) {
+      if ((a.joint_mode && a.joint_target_ms > 0) || (a.have_target && a.filter.hasTarget())) {
+        min_t = std::min(min_t, a.target_timeout_ms);
+      }
+    }
+    return min_t;
+  }
+
   bool anyTargetFresh(std::int64_t now) const
   {
-    const std::int64_t age = maxTargetAgeMs(now);
-    return age >= 0 && age <= static_cast<std::int64_t>(target_timeout_ms_);
+    std::lock_guard<std::mutex> arm_lock(arm_state_mtx_);
+    bool have_active_arm = false;
+    for (const auto & a : arms_) {
+      std::int64_t age = -1;
+      if (a.joint_mode) {
+        if (a.joint_target_ms == 0) {continue;}
+        have_active_arm = true;
+        age = std::max<std::int64_t>(0, now - a.joint_target_ms);
+      } else {
+        if (!a.have_target || !a.filter.hasTarget()) {continue;}
+        have_active_arm = true;
+        const auto raw_age = a.filter.ageMs(now);
+        age = raw_age > 0 ? raw_age : 0;
+      }
+      if (age < 0 || age > static_cast<std::int64_t>(a.target_timeout_ms)) {
+        return false;
+      }
+    }
+    return have_active_arm;
   }
 
   void fail(const std::string & why)
@@ -2427,6 +2474,7 @@ private:
       a.seg_t0_s = 0.0; a.seg_dur_s = 0.0;
       a.joint_mode = false;
       a.joint_target.clear(); a.joint_active.clear(); a.joint_target_ms = 0;
+      a.target_timeout_ms = target_timeout_ms_;
       a.prev_ik_sol.clear(); a.prev_ik_ms = 0; a.last_ik_ms = 0;
       a.solved_once = false;
       a.ik_status = 0; a.ik_action = 0;
@@ -2463,7 +2511,7 @@ private:
     const std::size_t nj = arm.joints.size();
     if (arm.joint_target.size() != nj) {return true;}
     if (arm.joint_target_ms == 0 ||
-        now - arm.joint_target_ms > static_cast<std::int64_t>(target_timeout_ms_)) {
+        now - arm.joint_target_ms > static_cast<std::int64_t>(arm.target_timeout_ms)) {
       if (snap.covers(canonical_joints_.size())) {
         arm.q_last.assign(snap.position.begin() + static_cast<long>(arm.offset),
                           snap.position.begin() + static_cast<long>(arm.offset + nj));
@@ -2618,7 +2666,7 @@ private:
     }
     // ⚠️ 陈旧目标**绝不能**跟随：enable 后旧 filter 目标还在时，会先按旧目标
     //    解一次 IK 再下发 —— 那就是"切 HOLD/TRACKING 时自己打自己"的直接原因。
-    if (arm.filter.ageMs(now) > static_cast<std::int64_t>(target_timeout_ms_)) {
+    if (arm.filter.ageMs(now) > static_cast<std::int64_t>(arm.target_timeout_ms)) {
       return true;
     }
     // 首帧的 q_last 必须是**实测**，否则插值会从全 0 起跳（= 近乎 3 rad 的突跳）

@@ -71,10 +71,19 @@ static void test_input_filter()
     CHECK(!f.sample(p), "没有帧时 sample 必须返回 false");
   }
   {
-    // 静态输入：滤波后应收敛到真值（直流增益 = 1）
+    // 静态输入：首帧即稳态对齐，无冷启动爬坡与虚假外推
     InputFilterConfig cfg; cfg.pose_lpf_hz = 15.0; cfg.velocity_lpf_hz = 25.0;
     InputFilter f; CHECK(f.configure(cfg), "configure");
-    for (int i = 0; i < 400; ++i) {
+    CHECK(f.push(mk(0, 0.3, -0.2, 0.5)), "首帧 push 应成功");
+    Pose6 p0; CHECK(f.sample(p0), "首帧 sample 应成功");
+    CHECK(near(p0.position[0], 0.3, 1e-6), "首帧 x 应直接等于 0.3，得到 %.6f", p0.position[0]);
+    CHECK(near(p0.position[1], -0.2, 1e-6), "首帧 y 应直接等于 -0.2，得到 %.6f", p0.position[1]);
+    CHECK(near(p0.position[2], 0.5, 1e-6), "首帧 z 应直接等于 0.5，得到 %.6f", p0.position[2]);
+    CHECK(near(vnorm(p0.linear_velocity), 0.0, 1e-6), "首帧速度应精确为 0，得到 %.6f",
+          vnorm(p0.linear_velocity));
+
+    // 后续继续保持稳态（直流增益 = 1）
+    for (int i = 1; i < 400; ++i) {
       CHECK(f.push(mk(i*10, 0.3, -0.2, 0.5)), "push 应成功");
     }
     Pose6 p; CHECK(f.sample(p), "sample");

@@ -294,8 +294,20 @@ public:
         const bool need = (std::fabs(eff_pose - pose_lpf_eff_hz_) > 0.1 * std::max(1.0, eff_pose)) ||
                           (std::fabs(eff_vel - vel_lpf_eff_hz_) > 0.1 * std::max(1.0, eff_vel));
         if (need) {
-          if (eff_pose > 0.0) {for (auto & f : pose_lpf_) {f.configure(eff_pose, f_up);}}
-          if (eff_vel > 0.0) {for (auto & f : vel_lpf_) {f.configure(eff_vel, f_up);}}
+          if (eff_pose > 0.0) {
+            for (auto & f : pose_lpf_) {
+              const double prev_val = f.value();
+              f.configure(eff_pose, f_up);
+              f.reset(prev_val);
+            }
+          }
+          if (eff_vel > 0.0) {
+            for (auto & f : vel_lpf_) {
+              const double prev_val = f.value();
+              f.configure(eff_vel, f_up);
+              f.reset(prev_val);
+            }
+          }
           pose_lpf_eff_hz_ = eff_pose;
           vel_lpf_eff_hz_ = eff_vel;
           if (want_pose > eff_pose || want_vel > eff_vel) {++lpf_clamp_count_;}
@@ -303,7 +315,13 @@ public:
       }
     }
 
-    // ---- ④ 逐轴低通 ----
+    // ---- ④ 逐轴低通（首帧以当前输入对齐稳态，杜绝从零爬坡与虚假速度外推）----
+    if (!have_prev_filtered_) {
+      for (std::size_t i = 0; i < 3; ++i) {
+        pose_lpf_[i].reset(raw.position[i]);
+        pose_lpf_[3 + i].reset(rv[i]);
+      }
+    }
     Vec3 pos{0, 0, 0}, rot{0, 0, 0};
     for (std::size_t i = 0; i < 3; ++i) {
       pos[i] = pose_lpf_[i].step(raw.position[i]);

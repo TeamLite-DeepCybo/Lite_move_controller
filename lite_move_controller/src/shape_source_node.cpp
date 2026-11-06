@@ -67,8 +67,8 @@ public:
     // ⚠️ 左右**各自**的圆心：两臂不能共用同一个中心（实测过：x 都写 +0.30 时，
     //    右臂被命令横跨身体 0.35 m，左右目标间距最小 6.8 mm → 两个夹爪会互撞）。
     //    为空则回退到 `center`（旧行为）。
-    declare_parameter<std::vector<double>>("center_left", {});
-    declare_parameter<std::vector<double>>("center_right", {});
+    declare_parameter<std::vector<double>>("center_left", std::vector<double>{});
+    declare_parameter<std::vector<double>>("center_right", std::vector<double>{});
     // 右臂画什么：circle / square（旧行为是 square）。左臂固定画圆。
     declare_parameter<std::string>("right_kind", "square");
     // 右臂画圆时的直径（<=0 表示跟随 circle_diameter_m）
@@ -87,8 +87,8 @@ public:
     // ⚠️ 为什么需要：两臂当前姿态可能相差很大（本机实测 115°），而 plane 是
     //    两支臂**共用**的 ⇒ 共用推导姿态会把其中一条臂的腕部扭到限位附近。
     //    做"保持当前姿态、只平移画图"的测试时，把各自的当前姿态传进来即可。
-    declare_parameter<std::vector<double>>("orientation_left", {});
-    declare_parameter<std::vector<double>>("orientation_right", {});
+    declare_parameter<std::vector<double>>("orientation_left", std::vector<double>{});
+    declare_parameter<std::vector<double>>("orientation_right", std::vector<double>{});
 
     const double rate = get_parameter("rate_hz").as_double();
     if (!(rate > 0.0)) {

@@ -43,6 +43,14 @@ BridgeClient::BridgeClient(rclcpp::Node * node, std::string source_name,
   snap_.effort.assign(canonical_joints_.size(), 0.0);
 }
 
+BridgeClient::~BridgeClient()
+{
+  if (feedback_executor_) {
+    try {feedback_executor_->cancel();} catch (...) {}  // Context may already be shut down.
+  }
+  if (feedback_thread_.joinable()) {feedback_thread_.join();}
+}
+
 bool BridgeClient::start(std::string & error_out)
 {
   if (node_ == nullptr) {error_out = "node 为空"; return false;}
@@ -53,15 +61,31 @@ bool BridgeClient::start(std::string & error_out)
   // 与桥一致：reliable(10)
   pub_ = node_->create_publisher<robstride_msgs::msg::MotionCommand>(
       command_topic_, rclcpp::QoS(10).reliable());
-  // ⚠️ 订阅放进**独立的回调组**（见头文件构造参数的说明）：
-  //    否则它落在节点 default（MutuallyExclusive）组里，会被同组里的其它回调
-  //    （以及被占满的 executor 线程）饿住，表现为"关节状态失鲜 → FAULT"。
+  // 仅保留最新反馈；回调组和 executor 均独立于同步服务、IK 与定时器。
   {
+    if (!js_cb_group_) {
+      js_cb_group_ = node_->create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive, false);
+    }
     rclcpp::SubscriptionOptions js_opt;
-    js_opt.callback_group = js_cb_group_;      // nullptr = 旧行为（节点默认组）
+    js_opt.callback_group = js_cb_group_;
     js_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
-        joint_states_topic_, rclcpp::QoS(20).reliable(),
+        joint_states_topic_, rclcpp::QoS(1).best_effort(),
         [this](sensor_msgs::msg::JointState::SharedPtr m) {onJointStates(m);}, js_opt);
+    // A callback group alone still competes for the controller executor's
+    // workers. Own one bounded feedback lane, independent of IK/services/timers.
+    rclcpp::ExecutorOptions options;
+    options.context = node_->get_node_base_interface()->get_context();
+    feedback_executor_ = std::make_unique<rclcpp::executors::SingleThreadedExecutor>(options);
+    feedback_executor_->add_callback_group(js_cb_group_, node_->get_node_base_interface());
+    feedback_thread_ = std::thread([this]() {
+      try {feedback_executor_->spin();}
+      catch (const std::exception & e) {
+        // Do not manufacture a fresh sample after a receiver failure: the
+        // unchanged freshness watchdog will fence the controller.
+        RCLCPP_ERROR(node_->get_logger(), "joint feedback receiver stopped: %s", e.what());
+      }
+    });
   }
 
   set_mode_cli_ = node_->create_client<robstride_msgs::srv::SetMode>("/lite_bridge/set_mode");
@@ -76,6 +100,12 @@ void BridgeClient::onJointStates(const sensor_msgs::msg::JointState::SharedPtr m
   // ⚠️ 回调里只做"索引 + 拷贝"，不做任何可能阻塞的事。
   //    `/joint_states` 是 100 Hz，这里慢了会拖垮整个 executor。
   if (!validJointFeedback(msg->name, msg->position, msg->velocity, msg->effort)) {return;}
+  const auto source_ns = static_cast<std::int64_t>(msg->header.stamp.sec) * 1000000000LL +
+    msg->header.stamp.nanosec;
+  const auto ros_now_ns = node_->now().nanoseconds();
+  if (msg->header.stamp.nanosec >= 1000000000U || source_ns <= 0 || source_ns > ros_now_ns) {
+    return;
+  }
   const std::size_t n = canonical_joints_.size();
   std::vector<double> p(n, 0.0), v(n, 0.0), e(n, 0.0);
   std::vector<char> seen(n, 0);
@@ -97,13 +127,16 @@ void BridgeClient::onJointStates(const sensor_msgs::msg::JointState::SharedPtr m
 
   std::lock_guard<std::mutex> lk(mu_);
   if (covered == n) {
+    // Replayed or out-of-order samples cannot refresh reception freshness.
+    if (source_ns <= snap_.source_stamp_ns) {return;}
     snap_.valid = true;
     snap_.position = std::move(p);
     snap_.velocity = std::move(v);
     snap_.effort = std::move(e);
     snap_.stamp_ms = steadyNowMs();
+    snap_.source_stamp_ns = source_ns;
     last_all_ms_ = snap_.stamp_ms;
-    have_all_ = true;
+    have_all_.store(true);
   }
   // 覆盖不全时**不更新**快照 —— 宁可让调用方看到"陈旧"，
   // 也不要把"缺失关节填 0"当成实测值（填 0 = 朝零位使劲，本项目踩过）。
@@ -126,7 +159,11 @@ std::int64_t BridgeClient::stateAgeMs(std::int64_t now_ms) const noexcept
   //    或者把 `target_fresh` 打成 false ⇒ DWELL↔RUNNING 抖动（真机实测）。
   //    这里夹到 0（= 刚刚到达），调用方那边也会用**新鲜一点的 now** 重算。
   const std::int64_t age = now_ms - last_all_ms_;
-  return age > 0 ? age : 0;
+  std::int64_t source_age_ns;
+  try {source_age_ns = node_->now().nanoseconds() - snap_.source_stamp_ns;}
+  catch (...) {return -1;}
+  if (source_age_ns < 0) {return -1;}
+  return std::max<std::int64_t>(age > 0 ? age : 0, source_age_ns / 1000000LL);
 }
 
 void BridgeClient::publish(const std::vector<double> & position,

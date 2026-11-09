@@ -38,3 +38,20 @@ source install/setup.bash
 控制结构、默认动力学参数、启动方法和构型变更流程见
 [`lite_move_controller/README.md`](lite_move_controller/README.md)。接口定义见
 [`move_msgs/README.md`](move_msgs/README.md)。
+
+## Joint feedback scheduling
+
+`BridgeClient` receives the newest `/joint_states` sample on its own executor
+and thread, independently of synchronous services, IK and controller timers.
+The subscription keeps one best-effort sample; it does not drain an old reliable
+queue after the general executor becomes busy. The configured freshness watchdog
+is unchanged. Freshness is the greater of source timestamp age and steady-clock
+reception age; incomplete, invalid, duplicate, out-of-order and future samples do
+not refresh it. A supplied feedback callback group must be created with automatic
+executor attachment disabled. With no supplied group, the client creates one.
+
+`independent_feedback_lane` uses isolated ROS domain 186 without an actuator. It
+leaves the controller's general executor unspun and checks independent reception,
+then verifies that replayed and future samples still become stale. Run it with
+the controller's other CTest tests after building. Hardware jitter and measured
+hold require separate device acceptance; passing this test does not prove either.

@@ -35,9 +35,11 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/executors/single_threaded_executor.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/header.hpp>
 
@@ -57,6 +59,7 @@ struct JointSnapshot
   std::vector<double> position;
   std::vector<double> velocity;
   std::vector<double> effort;
+  std::int64_t source_stamp_ns{0};
 
   bool covers(std::size_t n) const noexcept
   {
@@ -101,26 +104,22 @@ struct BridgeStatusLite
 class BridgeClient
 {
 public:
-  /// @param js_cb_group `/joint_states` 订阅用的回调组。
-  ///
-  /// ⚠️ **必须给它一个独立于服务调用/定时器的回调组**（真机踩过）：
-  ///    不给 ⇒ 落在节点的 **default MutuallyExclusive** 组里；而状态/控制定时器
-  ///    一旦在别的组里长时间阻塞（同步服务调用最坏 2 s），MultiThreadedExecutor
-  ///    的线程会被占满，`/joint_states`（100 Hz）的回调就**排不上队** ⇒
-  ///    `stateAgeMs` 超过 `state_timeout_ms` ⇒ 状态机在 RUNNING 里判
-  ///    "运行中 /joint_states 失鲜" → FAULT。实测接管后约 21 s 触发。
-  ///    nullptr = 保持旧行为（用节点默认组），只有离线小程序会这么用。
+  /// @param js_cb_group 独占的 `/joint_states` 回调组，创建时须关闭
+  ///    automatically_add_to_executor_with_node；nullptr 时内部创建。
+  /// 订阅由专用 executor/线程执行，不依赖控制/状态/服务 executor 的空闲线程。
+  /// 最新一帧的源时间与接收时间共同约束 freshness；重复、乱序和未来帧不刷新它。
   BridgeClient(rclcpp::Node * node, std::string source_name,
                std::vector<std::string> canonical_joints,
                std::string command_topic, std::string joint_states_topic,
                double command_timeout_ms,
                rclcpp::CallbackGroup::SharedPtr js_cb_group = nullptr);
+  ~BridgeClient();
 
   /// 建立订阅与 publisher。返回 false ⇒ 配置不可用。
   bool start(std::string & error_out);
 
   /// 是否收到过满足"覆盖全部 canonical 关节"的 `/joint_states`。
-  bool stateReady() const noexcept {return have_all_;}
+  bool stateReady() const noexcept {return have_all_.load();}
 
   /// 取最新快照（拷贝，短锁）。
   JointSnapshot snapshot() const;
@@ -181,8 +180,10 @@ private:
   }
 
   rclcpp::Node * node_{nullptr};
-  /// `/joint_states` 的独立回调组（见构造函数参数的说明）；nullptr = 节点默认组。
+  /// `/joint_states` 的独占回调组，只挂载到 feedback_executor_。
   rclcpp::CallbackGroup::SharedPtr js_cb_group_;
+  std::unique_ptr<rclcpp::executors::SingleThreadedExecutor> feedback_executor_;
+  std::thread feedback_thread_;
   std::string source_name_;
   std::vector<std::string> canonical_joints_;
   std::string command_topic_;
@@ -198,7 +199,7 @@ private:
   mutable std::mutex mu_;
   JointSnapshot snap_{};
   std::vector<int> index_of_canonical_;   ///< canonical 关节在消息里的下标；-1 = 缺
-  bool have_all_{false};
+  std::atomic<bool> have_all_{false};
   std::int64_t last_all_ms_{0};
 
   std::atomic<std::uint64_t> published_{0};

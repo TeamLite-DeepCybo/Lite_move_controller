@@ -227,7 +227,9 @@ public:
     }
     // ---- 回调组（**三组各司其职**，见 setupRosInterfaces 的详细说明）--------
     // 必须在 BridgeClient 之前建：/joint_states 的订阅要用它自己的组。
-    joint_states_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+    // BridgeClient attaches this group to its dedicated feedback executor.
+    // It must never be auto-attached to the general controller executor.
+    joint_states_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive, false);
     control_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     state_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     // ⚠️ 目标流也要**独立**（MX 即可）：它只做 filter.push（纯计算）。

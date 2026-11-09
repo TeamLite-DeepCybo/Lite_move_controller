@@ -236,6 +236,12 @@ if(BUILD_TESTING)
   add_executable(test_bounded_stream test/test_bounded_stream.cpp)
   target_include_directories(test_bounded_stream PRIVATE include)
   add_test(NAME bounded_stream_contract COMMAND test_bounded_stream)
+  add_executable(test_feedback_lane test/test_feedback_lane.cpp)
+  target_link_libraries(test_feedback_lane lite_move_controller_bridge)
+  ament_target_dependencies(test_feedback_lane rclcpp robstride_msgs sensor_msgs std_msgs)
+  add_test(NAME independent_feedback_lane COMMAND test_feedback_lane)
+  set_tests_properties(independent_feedback_lane PROPERTIES TIMEOUT 10
+    ENVIRONMENT "ROS_DOMAIN_ID=186;LITE_DCH_FAKE_ONLY=1;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST")
 endif()
 
 target_link_libraries(move_controller_node OpenSSL::Crypto)

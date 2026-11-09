@@ -41,14 +41,13 @@ source install/setup.bash
 
 ## Joint feedback scheduling
 
-`BridgeClient` receives the newest `/joint_states` sample on its own executor
+`BridgeClient` receives the newest `/joint_states` sample on its own ROS context, read-only node, executor
 and thread, independently of synchronous services, IK and controller timers.
 The subscription keeps one best-effort sample; it does not drain an old reliable
 queue after the general executor becomes busy. The configured freshness watchdog
 is unchanged. Freshness is the greater of source timestamp age and steady-clock
 reception age; incomplete, invalid, duplicate, out-of-order and future samples do
-not refresh it. A supplied feedback callback group must be created with automatic
-executor attachment disabled. With no supplied group, the client creates one.
+not refresh it. The receiver preserves the caller's DDS domain and has no actuator publisher, service or parameter service.
 
 `independent_feedback_lane` uses isolated ROS domain 186 without an actuator. It
 leaves the controller's general executor unspun and checks independent reception,

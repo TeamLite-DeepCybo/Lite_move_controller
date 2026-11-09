@@ -104,15 +104,12 @@ struct BridgeStatusLite
 class BridgeClient
 {
 public:
-  /// @param js_cb_group 独占的 `/joint_states` 回调组，创建时须关闭
-  ///    automatically_add_to_executor_with_node；nullptr 时内部创建。
-  /// 订阅由专用 executor/线程执行，不依赖控制/状态/服务 executor 的空闲线程。
-  /// 最新一帧的源时间与接收时间共同约束 freshness；重复、乱序和未来帧不刷新它。
+  /// 接收器使用独立 ROS context、只读节点与 executor，保留调用节点的 DDS 域。
+  /// 服务/目标的节点与接收器不共享 wait set、图更新或回调调度。
   BridgeClient(rclcpp::Node * node, std::string source_name,
                std::vector<std::string> canonical_joints,
                std::string command_topic, std::string joint_states_topic,
-               double command_timeout_ms,
-               rclcpp::CallbackGroup::SharedPtr js_cb_group = nullptr);
+               double command_timeout_ms);
   ~BridgeClient();
 
   /// 建立订阅与 publisher。返回 false ⇒ 配置不可用。
@@ -180,8 +177,8 @@ private:
   }
 
   rclcpp::Node * node_{nullptr};
-  /// `/joint_states` 的独占回调组，只挂载到 feedback_executor_。
-  rclcpp::CallbackGroup::SharedPtr js_cb_group_;
+  rclcpp::Context::SharedPtr feedback_context_;
+  rclcpp::Node::SharedPtr feedback_node_;
   std::unique_ptr<rclcpp::executors::SingleThreadedExecutor> feedback_executor_;
   std::thread feedback_thread_;
   std::string source_name_;

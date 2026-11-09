@@ -1,5 +1,6 @@
 #include "lite_move_controller/bridge_client.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -54,6 +55,17 @@ int main(int argc, char ** argv)
     publish_for(1200, true);
     check(client.stateReady(), "feedback depends on main executor");
     check(client.stateAgeMs(steady_ms()) < 100, "healthy independent feedback became stale");
+    // The receiver must not acquire command or service authority as a side
+    // effect of isolation. This checks the actual DDS graph, not only options.
+    const std::string receiver_name = "feedback_lane_test_feedback";
+    auto graph = source->get_node_graph_interface();
+    const auto node_names = graph->get_node_names();
+    check(std::find(node_names.begin(), node_names.end(),
+      "/lite_feedback_test/" + receiver_name) != node_names.end(), "receiver node missing from isolated graph");
+    check(graph->get_publisher_names_and_types_by_node(receiver_name, "/lite_feedback_test").empty(),
+      "feedback receiver has publisher authority");
+    check(graph->get_service_names_and_types_by_node(receiver_name, "/lite_feedback_test").empty(),
+      "feedback receiver exposes a service");
     const auto last_stamp = client.snapshot().source_stamp_ns;
     publish_for(180, false);
     check(client.snapshot().source_stamp_ns == last_stamp, "duplicate source timestamp refreshed sample");
@@ -63,7 +75,25 @@ int main(int argc, char ** argv)
     msg.header.stamp = (source->now() + rclcpp::Duration::from_seconds(2.0));
     publish_for(180, false);
     check(client.stateAgeMs(steady_ms()) >= 100, "future sample bypassed watchdog");
-    std::cout << "PASS: independent receiver, stale/replayed/future samples remain fenced\n";
+    // The receiver must not share the caller's RMW context. Shutting down the
+    // caller context cannot silence the passive receiver while it is alive.
+    rclcpp::shutdown();
+    auto source_context = std::make_shared<rclcpp::Context>();
+    rclcpp::InitOptions options;
+    options.set_domain_id(186);
+    options.auto_initialize_logging(false);
+    source_context->init(0, nullptr, options);
+    source = std::make_shared<rclcpp::Node>("independent_source", "/lite_feedback_test",
+      rclcpp::NodeOptions().context(source_context));
+    publisher = source->create_publisher<sensor_msgs::msg::JointState>(
+      "/lite_feedback_test/joints", rclcpp::QoS(1).reliable());
+    publish_for(3000, true);
+    if (client.stateAgeMs(steady_ms()) >= 100 || client.stateAgeMs(steady_ms()) < 0) {
+      std::cerr << "age=" << client.stateAgeMs(steady_ms()) << " source=" << client.snapshot().source_stamp_ns << " now=" << source->now().nanoseconds() << " matches=" << publisher->get_subscription_count() << std::endl;
+    }
+    check(client.stateAgeMs(steady_ms()) < 100 && client.stateAgeMs(steady_ms()) >= 0, "receiver did not recover after caller context shutdown and producer replacement");
+    source_context->shutdown("fixture finished");
+    std::cout << "PASS: independent context/receiver; stale/replayed/future samples remain fenced\n";
   } catch (const std::exception & e) {
     std::cerr << e.what() << '\n'; result = 1;
   }

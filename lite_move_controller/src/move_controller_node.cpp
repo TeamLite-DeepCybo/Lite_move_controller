@@ -226,10 +226,7 @@ public:
       return false;
     }
     // ---- 回调组（**三组各司其职**，见 setupRosInterfaces 的详细说明）--------
-    // 必须在 BridgeClient 之前建：/joint_states 的订阅要用它自己的组。
-    // BridgeClient attaches this group to its dedicated feedback executor.
-    // It must never be auto-attached to the general controller executor.
-    joint_states_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive, false);
+    // BridgeClient owns its read-only feedback node/context and executor.
     control_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     state_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     // ⚠️ 目标流也要**独立**（MX 即可）：它只做 filter.push（纯计算）。
@@ -237,7 +234,7 @@ public:
     target_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     bridge_ = std::make_unique<BridgeClient>(
         this, source_name_, canonical_joints_, command_topic_, joint_states_topic_,
-        command_timeout_ms_, joint_states_cb_group_);
+        command_timeout_ms_);
     std::string err;
     if (!bridge_->start(err)) {
       load_error_ = "桥客户端启动失败：" + err;
@@ -876,7 +873,7 @@ private:
     //     堆自己（一个 tick 没跑完，下一拍就排队等，而不是再开一个线程）；
     //   · `state_cb_group_`：**MutuallyExclusive**，状态 tick 同理，且它的同步
     //     服务调用（ARMING/SWITCHING 里的 setSource/setMode）再长也只堵它自己；
-    //   · `joint_states_cb_group_`：**Reentrant 且独立**（见 initialize()），
+    //   · `/joint_states`：BridgeClient 的独立只读节点/context/executor，
     //     任何组里的阻塞都饿不到它 —— `onJointStates` 只有一次短锁，安全。
     //   · 服务（enable/disable/get_status/ik_query）留在 default 组：它们彼此
     //     串行就够了，且**不能**和状态 tick 同组（状态 tick 等桥的响应时需要
@@ -3429,7 +3426,6 @@ private:
 
   // ---- 回调组（三个，各司其职；见 setupRosInterfaces 的说明）-------------
   /// `/joint_states` 专用（**Reentrant + 独立**）：任何组里的阻塞都饿不到它。
-  rclcpp::CallbackGroup::SharedPtr joint_states_cb_group_;
   /// 100 Hz 控制 tick 专用（**MutuallyExclusive**）：不允许自己堆自己。
   rclcpp::CallbackGroup::SharedPtr control_cb_group_;
   /// 20 Hz 状态机 + 状态发布专用（**MutuallyExclusive**）：它的同步服务调用

@@ -27,10 +27,8 @@ std::int64_t steadyNowMs()
 BridgeClient::BridgeClient(rclcpp::Node * node, std::string source_name,
                            std::vector<std::string> canonical_joints,
                            std::string command_topic, std::string joint_states_topic,
-                           double command_timeout_ms,
-                           rclcpp::CallbackGroup::SharedPtr js_cb_group)
+                           double command_timeout_ms)
 : node_(node),
-  js_cb_group_(std::move(js_cb_group)),
   source_name_(std::move(source_name)),
   canonical_joints_(std::move(canonical_joints)),
   command_topic_(std::move(command_topic)),
@@ -49,6 +47,9 @@ BridgeClient::~BridgeClient()
     try {feedback_executor_->cancel();} catch (...) {}  // Context may already be shut down.
   }
   if (feedback_thread_.joinable()) {feedback_thread_.join();}
+  if (feedback_context_ && feedback_context_->is_valid()) {
+    feedback_context_->shutdown("feedback receiver destroyed");
+  }
 }
 
 bool BridgeClient::start(std::string & error_out)
@@ -63,21 +64,28 @@ bool BridgeClient::start(std::string & error_out)
       command_topic_, rclcpp::QoS(10).reliable());
   // 仅保留最新反馈；回调组和 executor 均独立于同步服务、IK 与定时器。
   {
-    if (!js_cb_group_) {
-      js_cb_group_ = node_->create_callback_group(
-        rclcpp::CallbackGroupType::MutuallyExclusive, false);
-    }
-    rclcpp::SubscriptionOptions js_opt;
-    js_opt.callback_group = js_cb_group_;
-    js_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
+    // Keep DDS discovery/wait-set work for services and action clients out of
+    // the feedback receiver as well as out of its executor. This node owns no
+    // actuator publisher, service, parameter service or rosout publisher.
+    feedback_context_ = std::make_shared<rclcpp::Context>();
+    auto init_options = node_->get_node_base_interface()->get_context()->get_init_options();
+    init_options.set_domain_id(node_->get_node_base_interface()->get_context()->get_domain_id());
+    init_options.auto_initialize_logging(false);
+    feedback_context_->init(0, nullptr, init_options);
+    rclcpp::NodeOptions node_options;
+    node_options.context(feedback_context_).use_global_arguments(false)
+      .enable_rosout(false).enable_logger_service(false)
+      .start_parameter_services(false).start_parameter_event_publisher(false)
+      .parameter_overrides({rclcpp::Parameter("start_type_description_service", false)});
+    feedback_node_ = std::make_shared<rclcpp::Node>(
+      std::string(node_->get_name()) + "_feedback", node_->get_namespace(), node_options);
+    js_sub_ = feedback_node_->create_subscription<sensor_msgs::msg::JointState>(
         joint_states_topic_, rclcpp::QoS(1).best_effort(),
-        [this](sensor_msgs::msg::JointState::SharedPtr m) {onJointStates(m);}, js_opt);
-    // A callback group alone still competes for the controller executor's
-    // workers. Own one bounded feedback lane, independent of IK/services/timers.
+        [this](sensor_msgs::msg::JointState::SharedPtr m) {onJointStates(m);});
     rclcpp::ExecutorOptions options;
-    options.context = node_->get_node_base_interface()->get_context();
+    options.context = feedback_context_;
     feedback_executor_ = std::make_unique<rclcpp::executors::SingleThreadedExecutor>(options);
-    feedback_executor_->add_callback_group(js_cb_group_, node_->get_node_base_interface());
+    feedback_executor_->add_node(feedback_node_);
     feedback_thread_ = std::thread([this]() {
       try {feedback_executor_->spin();}
       catch (const std::exception & e) {

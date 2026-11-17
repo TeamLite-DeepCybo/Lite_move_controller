@@ -208,6 +208,8 @@ endif()
 install(DIRECTORY include/ DESTINATION include)
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
+install(PROGRAMS scripts/run_circle_square.py scripts/run_circle_square.sh
+  DESTINATION lib/${PROJECT_NAME})
 
 install(TARGETS move_controller_node move_shape_source gripper_node
   RUNTIME DESTINATION lib/${PROJECT_NAME}

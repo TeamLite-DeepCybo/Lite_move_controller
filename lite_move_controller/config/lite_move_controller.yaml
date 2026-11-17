@@ -81,12 +81,13 @@ lite_move_controller:
     params_json: "config/dynamics/identified_params.json"
 
     # --- 控制律（**启动期固定**，运行期不支持在线切换）---------------------
-    # regular / admittance / impedance
+    # regular / admittance / impedance / gravity_compensation
     control_mode: "regular"
     # ⚠️ **下发频率固定 100 Hz**（设计前提：上层 10/20 Hz 时我们仍以 100 Hz
     #    下发柔顺曲线）。IK 慢不靠降频解决，靠下面的 ik_rate_hz 解耦。
     control_rate_hz: 100.0
-    # **IK 重解节拍**（Hz）。只是"最早多久再解一次"的上限：IK 单次耗时不稳定
+    # 独立 IK 消费最新位姿的节拍（Hz，启动期配置）；不重复求解旧样本。
+    # IK 单次耗时不稳定
     # （pick_ik 4~50 ms），插值按**墙钟时间**推进（三次 Hermite），早到提前切段、
     # 晚到停在端点等 —— 不依赖"每 4 拍走 1/4"这种固定节拍。
     ik_rate_hz: 25.0

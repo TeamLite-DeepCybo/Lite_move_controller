@@ -35,8 +35,9 @@ IK 节点根据当前关节状态做阻尼最小二乘微分逆解，并利用�
 拉向限位中部；必要时调用全局 IK 后端兜底。控制器收到关节目标后用三次 Hermite
 段连接相邻解，以固定控制频率发布完整关节帧。
 
-控制器支持三种启动期模式：
+控制器支持以下启动期模式：
 
+- `gravity_compensation`：进入内部重力补偿运行状态，拒绝运动和夹爪目标；手臂按实测位置计算 `g(q)`，Kp=0、Kd=1，不加摩擦或惯性项。
 - `regular`：关节位置、速度与动力学前馈。
 - `admittance`：由估计外力生成位姿偏移，再沿普通跟踪链路下发。
 - `impedance`：由末端位姿误差经 `Jᵀ(Kx + Dẋ)` 生成附加关节力矩。
@@ -114,7 +115,14 @@ ros2 launch lite_move_controller move_controller.launch.py \
 - `mode:=admittance`：导纳控制
 - `mode:=impedance`：末端阻抗控制
 
-节点默认处于 STANDBY 待命状态。确认状态后启用：
+节点完成授权和模式回读后进入 STANDBY：底层保持 MIT TRACKING，以 100 Hz
+保持当前实测位置并更新重力前馈，不接受运动目标。enable 只开放目标输入；
+disable 清除目标、重新锚定实测并回待命，保留 TRACKING 与授权。故障、失鲜或
+被抢占仍停止下发，允许底层安全降级。
+
+实测臂关节超出模型限位（容许 0.01 rad 的端点误差）会进入 FAULT，启动时不
+锁源、不切 TRACKING；运行时立即停发。不能通过裁剪越界实测来建立待命目标，
+否则会在接管时产生位置跳变。需核对机器人姿态与本机标定后再恢复。确认状态后启用：
 
 ```bash
 ros2 topic echo /lite_move_controller/status --once
@@ -137,107 +145,18 @@ ros2 service call /lite_move_controller/enable std_srvs/srv/Trigger "{}"
   ros2 topic pub /gripper/opening std_msgs/msg/Float64 "{data: 0.0}" --once   # 全闭
   ```
 
-### 4. 一键示范：左圆右方 + 夹爪三态循环
+### 4. 外部接口示范：左圆右方
 
-启动带夹爪的 bringup 后，在终端中直接运行一键脚本：
+先启动 bringup 和 move_controller（见文末完整命令），再运行安装后的示例：
 
 ```bash
-# 标准启动：16 轴阻抗控制 + 动力学前馈 + 夹爪 10s 三态循环
-bash src/Lite_move_controller/lite_move_controller/scripts/run_circle_square.sh
-
-# 环境变量微调示例：
-DURATION=600 SPEED=0.1 bash src/Lite_move_controller/lite_move_controller/scripts/run_circle_square.sh   # 运行 60s，线速度 0.04 m/s
-PLANE=horizontal bash src/Lite_move_controller/lite_move_controller/scripts/run_circle_square.sh         # 在 X-Y 水平桌面绘制
-ENABLE_GRIPPER=0 bash src/Lite_move_controller/lite_move_controller/scripts/run_circle_square.sh         # 禁用夹爪开闭示范（仅纯臂绘制）
+ros2 run lite_move_controller run_circle_square.py --duration 200 --speed 0.01
 ```
 
----
-
-## 左圆右方案例原理与运行指南
-
-「左圆右方」是运控层的综合验收示范：左臂在三维空间绘制严格水平向前的圆形轨迹，右臂绘制圆角正方形轨迹，同时夹爪进行三态开闭动作。该案例全面检验了**运动学微分逆解、笛卡尔阻抗控制、Pinocchio 动力学前馈补偿、四道闸安全限幅、夹爪解耦控制与三级误差解耦分析**。
-
-### 1. 案例执行流程与命令
-
-整个测试流程分为启动准备、预摆位、位姿轨迹跟踪三个阶段：
-
-```mermaid
-flowchart LR
-    A["底层 Bringup<br/>(16 轴 MIT 模式)"] --> B["运控层启动<br/>(move_controller + ik + gripper)"]
-    B --> C["阶段 1: 预摆位 (8s)<br/>关节空间平滑规划至起点"]
-    C --> D["阶段 2: 轨迹跟踪 (200s)<br/>左圆右方位姿模式 + 夹爪三态循环"]
-    D --> E["数据结算与导出<br/>三级误差解耦报告 & CSV 保存"]
-```
-
-#### 完整操作步骤
-
-**终端 1：底层 Bringup（带夹爪 16 轴模式）**
-```bash
-ros2 launch lite_bringup lite_bringup.launch.py \
-    mode:=arms_grippers controller:=modes control_mode:=mit \
-    source_names:=lite_move_controller
-```
-
-**终端 2：运行一键测试脚本**
-```bash
-bash src/Lite_move_controller/lite_move_controller/scripts/run_circle_square.sh
-```
-
-如需直接调用底层 Python 驱动脚本进行高度定制化测试：
-```bash
-python3 src/Lite_move_controller/lite_move_controller/scripts/run_circle_square.py \
-    --prepose-sec 8.0 \
-    --duration 200.0 \
-    --speed 0.05 \
-    --circle-d 0.12 \
-    --square-side 0.08 \
-    --corner-r 0.015 \
-    --dist-sym 0.20 \
-    --plane vertical \
-    --enable-gripper \
-    --stats-file tmp/circle_square_tracking_stats.csv
-```
-
-### 2. 核心数学与控制原理
-
-#### ① 阶段 1：关节空间平滑预摆位（Prepose）
-- **起点解算**：利用本地 URDF 与 Pinocchio 对两臂目标起点（左圆右方起始位姿，姿态严格水平向前 $q=[0.7071, 0, 0, 0.7071]$）求解带限位约束的逆运动学（$q_{pre}$）。
-- **三次 Hermite 关节规划**：从当前实际构型 $q_{meas}$ 到预摆位目标 $q_{pre}$ 进行多项式平滑插值，速度与加速度连续，防止在从任意收纳姿态切入形状时产生笛卡尔空间冲击或跨奇异点跳变。
-
-#### ② 阶段 2：任务空间连续轨迹生成
-- **左臂圆形（Circle）**：
-  $$p_L(t) = c_L + \begin{bmatrix} r \cos(\omega t) \\ 0 \\ r \sin(\omega t) \end{bmatrix}, \quad \omega = \frac{v}{r}, \quad r = 0.06\text{ m}$$
-- **右臂圆角正方形（Filleted Square）**：
-  采用边长 $a = 0.08\text{ m}$、圆角半径 $r_c = 0.015\text{ m}$ 的连续曲率轨迹。通过分段直线与圆弧过渡，消除直角转弯处的速度阶跃与加速度奇点。
-- **平滑过渡（Blend）**：在预摆位终点与形状起点之间加入 2.0s 的多项式混合过渡（Blend），确保切入几何轨迹时零冲击。
-
-#### ③ 任务空间阻抗控制与刚度动态映射
-- 控制器接收笛卡尔位姿目标，微分逆解节点 `lite_ik_node` 计算目标关节角；
-- 运控层实时计算解析雅可比矩阵 $J(q)$，根据任务空间配置的虚拟刚度 $K_x = [350, 350, 350, 4, 4, 4]$ 与阻尼 $D_x$，通过能量等价原则将其投影为关节空间对角刚度与阻尼：
-  $$K_{p, j_k} = \sum_{i=1}^6 J_{ik}^2 K_{x, i}, \quad K_{d, j_k} = \sum_{i=1}^6 J_{ik}^2 D_{x, i}$$
-- 这一映射消除了笛卡尔外环弹簧与 MIT 关节内环弹簧的“双弹簧并联冲突”，实现动态随动柔顺。
-
-#### ④ 动力学前馈补偿（Pinocchio 与 dyid）
-- 14 个手臂关节全部注入非线性重力与库仑/粘性摩擦力矩前馈：
-  $$\tau_{ff}(q, \dot{q}) = g(q) + \tau_{friction}(\dot{q})$$
-- 动力学模型使用 `lite_dyid` 离线辨识的高精度刚体惯量与摩擦参数（`identified_params.json`），使关节大部分静态重力由前馈力矩 $\tau_{ff}$ 承担，MIT 刚度环仅负责克服外力扰动与微小跟踪误差。
-
-#### ⑤ 夹爪解耦控制原理
-- **独立控制通道**：夹爪作为 16 轴模式下的增量控制节点，独立订阅 `/gripper/opening`（0.0 全闭 $\sim$ 1.0 全开），并按 URDF 限位 $[0.0, 0.047]\text{ m}$ 进行线性折算。
-- **动力学解耦**：夹爪电机力矩前馈恒为 0（$\tau_{ff, gripper} = 0.0\text{ N}\cdot\text{m}$），力矩上限由安全闸严格限制为 0.25 N·m，绝不干扰机械臂 14 轴的动力学补偿。
-- **三态循环示范**：在 200s 的画圆过程中，夹爪每 10 秒在全开 (1.0)、半开 (0.5)、全闭 (0.0) 之间平滑循环，验证手臂画圆与末端抓取的协同解耦能力。
-
-#### ⑥ 三级轨迹跟踪误差全链路解耦分析
-脚本全程以 100 Hz 采集三级轨迹并保存至 CSV 文件，并在测试结束时输出解耦评估报告：
-- **$p_d(t)$（期望轨迹）**：几何生成的理论目标点；
-- **$p_{plan}(t)$（规划轨迹）**：由运控层下发命令 `/lite_bridge/motion_command` 经正运动学计算出的末端位置；
-- **$p_{act}(t)$（实测轨迹）**：由电机编码器回读 `/joint_states` 经正运动学计算出的末端物理位置。
-
-数学空间满足严格的向量三角形解耦关系：
-$$e_{total} = p_{act} - p_d = \underbrace{(p_{plan} - p_d)}_{e_{plan}\text{ (规划滤波滞后)}} + \underbrace{(p_{act} - p_{plan})}_{e_{ctrl}\text{ (运控执行误差)}}$$
-- **$e_{plan}$**：反映目标滤波器的低通截止延迟、IK 插值收敛速度与可行性；
-- **$e_{ctrl}$**：反映阻抗刚度/阻尼响应特性、重力与摩擦补偿残差以及驱动伺服带宽。
-- 该分析使现场调试人员能清晰定位误差来源于“规划滤波迟滞”还是“力控跟踪残差”。
+示例调用公开 `ik_query` 预查起点和轨迹采样点，发送关节目标预摆位，实测接近
+起点后发送左圆、右圆角方形的末端位姿。插值和动力学由控制器负责，示例不加载
+内部模型。默认在 X-Z 平面绘制；`--plane horizontal` 改为 X-Y 平面。
+夹爪默认每 10 秒依次发送归一化 1、0.5、0；`--no-gripper` 关闭该示范。
 
 ## 动力学辨识参数
 
@@ -301,3 +220,65 @@ ros2 launch lite_move_controller move_controller.launch.py \
 - `joint_mode`、桥的 canonical 关节集合和启动参数必须一致。
 - 更换机器人构型后必须同步更新 `Lite_IK_node` 的模型资产并重新执行 `lite_dyid`。
 - 启动测试前先确认桥当前数据源和控制模式；测试结束可调用 `disable` 退出接管。
+
+
+## 2026-11 接口示例与运行约定
+
+运行态默认下发 100 Hz，DWELL 仍为 20 Hz。独立 IK 默认按 25 Hz 消费每臂最新位姿，
+`ik_rate_hz:=...` 可在启动时调整；关节目标直接透传。每份位姿只求解一次，排队和求解
+耗时均计入目标有效期，不用重复发布旧解掩盖断流。
+
+`enable_ik_node:=false` 后不执行任何逆解，也不回退内部 IK；`task_target` 和
+`joint_target` 仍接受 `TARGET_JOINTS`，位姿目标被拒绝，`ik_query` 返回关闭原因。
+
+纯重力补偿通过现有启动入口选择：
+
+```bash
+ros2 launch lite_move_controller move_controller.launch.py mode:=gravity_compensation joint_mode:=arms_grippers
+ros2 service call /lite_move_controller/enable std_srvs/srv/Trigger '{}'
+```
+
+该模式复用原有锁源、接管、disable、反馈失鲜、抢占和故障处理，无运动目标时持续
+补偿，不进入 DWELL。模型参数加载失败会拒绝启动。内部状态为 GRAVITY_COMPENSATION；
+为保持消息契约，对外仍为 `state=5 / state_name=RUNNING`，通过已有的
+`control_mode=gravity_compensation` 和 `state_detail` 区分。夹爪保持接管时实测开度，
+不参与手臂重力计算。激活斜坡期间补偿和阻尼渐入，稳定后手臂 Kd=1，仍受安全限幅。
+
+默认动力学数据随包保存在 `config/dynamics/identified_params.json`，安装时一起发布。
+它与 `lite_dyid` 的 `run_20261019_234605/params.json` 一致，生成时间为
+2026-10-20T08:54:39+00:00，SHA-256：
+`150849c04691b8734d98792d37201244920abda926d8f466d6955d161fe495f6`。
+默认 launch 解析为安装包内的绝对路径，不依赖当前目录或辨识工作目录；
+显式 `params_json:=...` 仍可覆盖。`get_status` 的 verbose 回读报告实际加载路径。
+
+夹爪只增加目标位置裁剪：归一化入口裁剪到 [0,1]，内部物理开度也限制到 URDF 范围；
+配置不能扩大该范围。驱动继续将物理开度映射到标定的闭合/张开端点。
+不增加边界减力、接触检测或新的夹持策略。未收到实测/指令的夹爪不发布初始化零目标。
+`gripper_torque_limit` 目前仅约束前馈字段，不代表完整 MIT 力矩上限；底层既有保护保持原样。
+
+左圆右方示例可从安装包直接运行；操作者应先启动驱动及本节点并确保处于 STANDBY：
+
+```bash
+ros2 launch lite_move_controller move_controller.launch.py mode:=impedance joint_mode:=arms_grippers
+ros2 run lite_move_controller run_circle_square.py --duration 200 --no-gripper
+```
+
+示例只使用公开的 `ik_query`、`get_status`、`enable`、`disable`、`task_target`、
+`status`，以及包内夹爪节点的公开归一化入口 `/gripper/command`。它不访问底层话题/服务、不加载 URDF、
+不启动或终止其它节点。先预查轨迹采样点，再发送关节预摆位，实测接近后开始末端
+轨迹；状态异常立即停止目标并请求 disable。预查仅验证采样点可达性，不是碰撞规划。
+
+`--stats-file` 保留原末端轨迹 CSV 列名和顺序，记录目标坐标；公开接口未提供的
+`plan`/`act` 坐标留空，不再依赖内部模型重算或虚构末端误差。关节反馈仍可从
+`status` 获取。旧 `--urdf` 参数保留兼容，但不读取文件。运行结束和 Ctrl+C 都请求 disable。
+新版电机层的 MIT HOLD 是故障退回用的纯阻尼，不等于锁住当前位置；健康
+STANDBY/disable 不再经过 HOLD。预摆位使用五次时间曲线，默认至少 30 s、
+最大关节速度 0.10 rad/s、加速度 0.15 rad/s²；图形默认速度 0.01 m/s。
+
+真机启动必须显式使用本机标定文件，不得用更新远端仓库附带的标定覆盖本机数据。
+同一套驱动、运控、示例需使用相同独立 ROS_DOMAIN_ID；本机测试设置
+ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST。运控发现重复命令/状态/机器人描述
+发布者会进入 FAULT，避免同名 ROS 节点串入其它机器的命令。
+
+14/16 轴需显式配对：底层 `mode:=arms/arms_grippers` 对应运控
+`joint_mode:=arms/arms_grippers`。本次不修改底层默认值或模式切换机制。

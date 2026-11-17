@@ -16,35 +16,9 @@
 // （`Actions`），由 ROS 外壳去执行。
 //
 // ===========================================================================
-// 状态与迁移（设计文档 §7.2）
-// ===========================================================================
-//
-//     IDLE ──load_ok──▶ STANDBY ──enable──▶ ARMING ──armed──▶ SWITCHING
-//       │                  ▲                   │                 │
-//       │                  │                   │fail             │mode_ok
-////      │               disable                └──────▶ STANDBY   ▼
-//       │                  │                                  RUNNING ⇄ SUSPENDED
-//       │                  │                                     │  ▲
-//       │                  │                            target_timeout│  │target_ok
-//       │                  │                                     ▼  │
-//       │                  │                                   DWELL
-//       │                  │                                     │
-//       │                  └──────────────disable────────────────┘
-//       │
-//       └─load_fail──▶ ERROR          （任意状态 ──violation──▶ FAULT ──clear──▶ STANDBY）
-//
-// **迁移守卫**（不满足就**停在原状态并给出原因**，绝不"猜"）：
-//
-//   STANDBY → ARMING    ：必须已加载（模型/IK/限位）、状态新鲜、无未清故障
-//   ARMING  → SWITCHING ：桥已确认授权（`set_source{LOCK}` 回读）
-//   SWITCHING → RUNNING ：桥回读 mode==2(MIT TRACKING) 且 controller_active
-//   RUNNING → SUSPENDED ：桥回读 active_source ≠ 自己（被抢占）
-//   RUNNING → DWELL     ：目标超时
-//   FAULT   → STANDBY   ：**只能**经 clear_fault，且必须重新 enable
-//                         （不允许从 FAULT 直接回 RUNNING —— 那等于"自动恢复出力"）
-//
-// ⚠️ **一次只发一个模式请求**：`SWITCHING` 里失败**不重试**（重试会撞上桥的
-//    迁移守则并可能留下半切状态）。失败 → 退回 STANDBY 并给出原因。
+// 健康待命也维持 MIT TRACKING：启动先锁源、直接切 TRACKING，再进入 STANDBY。
+// enable 只开放目标处理；disable 清除目标并保持当前实测位置，不交权、不切 HOLD。
+// FAULT / SUSPENDED 停发，底层安全降级仍由桥决定，绝不覆盖故障保护。
 #pragma once
 
 #include <cstdint>
@@ -71,6 +45,7 @@ enum class NodeState : std::uint8_t
   Dwell = 7,
   Fault = 8,
   Error = 9,
+  GravityCompensation = 10,  ///< 内部运行状态；对外映射到既有 RUNNING。
 };
 
 inline const char * nodeStateName(NodeState s) noexcept
@@ -86,28 +61,29 @@ inline const char * nodeStateName(NodeState s) noexcept
     case NodeState::Dwell:     return "DWELL";
     case NodeState::Fault:     return "FAULT";
     case NodeState::Error:     return "ERROR";
+    case NodeState::GravityCompensation: return "GRAVITY_COMPENSATION";
   }
   return "UNKNOWN";
 }
 
-/// 该状态下**是否允许下发** MotionCommand。
-///
-/// ⚠️ 这条是本文件最重要的一条规则：
-///   · `STANDBY` / `ARMING` / `SWITCHING` / `SUSPENDED` / `FAULT` / `ERROR`
-///     **一律不发帧**。理由：让桥的 `source_timeouts_ms` 超时 → `SAFE_HOLD`
-///     兜底。**发"全 0 软帧"是错的** —— MIT 全 0 = Kp=Kd=0 = 松劲 = 手臂塌下来。
-///   · `DWELL` 发**低频保持帧**（位置 = 最后目标），语义与桥的
-///     `timeout_action: hold` 一致（顶住，不松劲）。
-///   · `RUNNING` 全速下发。
+/// 允许输出的状态还必须由 ROS 外壳检查授权、MIT TRACKING 和反馈新鲜度。
+inline NodeState publicNodeState(NodeState s) noexcept
+{
+  return s == NodeState::GravityCompensation ? NodeState::Running : s;
+}
+
 inline bool statePublishes(NodeState s) noexcept
 {
-  return s == NodeState::Running || s == NodeState::Dwell;
+  return s == NodeState::Standby || s == NodeState::Switching ||
+         s == NodeState::Running || s == NodeState::Dwell ||
+         s == NodeState::GravityCompensation;
 }
 
 /// 全速下发（而非 DWELL 的低频保持）。
 inline bool statePublishesFullRate(NodeState s) noexcept
 {
-  return s == NodeState::Running;
+  return s == NodeState::Standby || s == NodeState::Switching ||
+         s == NodeState::Running || s == NodeState::GravityCompensation;
 }
 
 /// 一次 tick 的输入。所有时间都是**调用方给的单调毫秒**。
@@ -129,6 +105,7 @@ struct StateInputs
   bool bridge_source_changed{false}; ///< 桥回读 active_source 变了（抢占/释放）
 
   bool target_fresh{false};      ///< 目标在超时内
+  bool gravity_compensation{false}; ///< 启动期选择，不依赖运动目标。
   std::string violation;         ///< 非空 = 安全违例（NaN / 位置超差 / 求解失败连击…）
 };
 
@@ -138,7 +115,6 @@ struct StateInputs
 struct StateActions
 {
   bool request_lock_source{false};   ///< set_source{MODE_LOCK, 自己}
-  bool request_mode_hold{false};     ///< set_mode{→1}（MIT HOLD）
   bool request_mode_tracking{false}; ///< set_mode{→2}（MIT TRACKING）
   bool request_release_source{false};///< set_source{AUTO}
   bool request_standby{false};       ///< 桥的 ~/standby（安全档）
@@ -161,6 +137,8 @@ public:
   StateActions tick(const StateInputs & in) noexcept
   {
     StateActions act;
+    if (in.disable_requested) {run_requested_ = false;}
+    else if (in.enable_requested && state_ != NodeState::Fault) {run_requested_ = true;}
     // ⚠️ 桥回读**只有一个来源**：入参。早先同时保留 note*() 写成员 +
     //    读入参，两条路会分叉 —— 单测里就表现为"设了授权却还在 ARMING"。
     //    这里在入口统一刷一次成员，后面的 step* 只读成员，杜绝分叉。
@@ -169,6 +147,7 @@ public:
     // ---- 全局优先级 1：安全违例（最高，任何状态都可能被打到 FAULT）----
     if (!in.violation.empty() &&
         state_ != NodeState::Fault && state_ != NodeState::Error) {
+      run_requested_ = false;
       transitionTo(NodeState::Fault, in.now_ms, in.violation);
       // 进 FAULT 时**要求交权**（我们不再可信，别占着源）
       act.request_release_source = true;
@@ -189,6 +168,7 @@ public:
       case NodeState::Arming:    act = stepArming(in); break;
       case NodeState::Switching: act = stepSwitching(in); break;
       case NodeState::Running:   act = stepRunning(in); break;
+      case NodeState::GravityCompensation: act = stepRunning(in); break;
       case NodeState::Suspended: act = stepSuspended(in); break;
       case NodeState::Dwell:     act = stepDwell(in); break;
       case NodeState::Fault:     act = stepFault(in); break;
@@ -208,8 +188,9 @@ private:
   StateActions stepLoading(const StateInputs & in) noexcept
   {
     StateActions act;
-    if (in.load_ok) {
-      transitionTo(NodeState::Standby, in.now_ms, "已就绪（未接管）");
+    if (in.load_ok && in.state_fresh) {
+      transitionTo(NodeState::Arming, in.now_ms, "初始化 MIT 待命保持，等待锁源");
+      act.request_lock_source = true;
     }
     return act;
   }
@@ -217,73 +198,43 @@ private:
   StateActions stepStandby(const StateInputs & in) noexcept
   {
     StateActions act;
-    if (in.disable_requested) {return act;}          // 已在 STANDBY，幂等
-    if (!in.enable_requested) {return act;}
-    // 守卫：状态必须新鲜 —— 拿不到实测关节角就不能接管
-    //（否则可能把"实测 0"当成真值，正是 hold_controller 的 C2 那类错误）
     if (!in.state_fresh) {
-      detail_ = "enable 被拒：/joint_states 不新鲜或未覆盖全部关节";
-      return act;
+      transitionTo(NodeState::Fault, in.now_ms, "待命中 /joint_states 不新鲜");
+      act.request_release_source = true;
+    } else if (!in.bridge_authorized || !in.bridge_mode_ok) {
+      transitionTo(NodeState::Suspended, in.now_ms, "待命保持失去授权或 MIT TRACKING");
+    } else if (run_requested_) {
+      transitionTo(in.gravity_compensation ? NodeState::GravityCompensation : NodeState::Running,
+                   in.now_ms, in.gravity_compensation ? "纯重力补偿（Kp=0，Kd=1；拒绝运动目标）" : "已开放运动目标");
     }
-    transitionTo(NodeState::Arming, in.now_ms, "请求锁源…");
-    act.request_lock_source = true;
     return act;
   }
 
   StateActions stepArming(const StateInputs & in) noexcept
   {
     StateActions act;
-    if (in.disable_requested) {
-      transitionTo(NodeState::Standby, in.now_ms, "用户取消（ARMING 阶段）");
-      act.request_release_source = true;
-      return act;
-    }
     if (!in.state_fresh) {
-      transitionTo(NodeState::Standby, in.now_ms, "锁源期间状态失鲜，放弃接管");
+      transitionTo(NodeState::Fault, in.now_ms, "锁源期间反馈失鲜");
       act.request_release_source = true;
       return act;
     }
-    if (!in.bridge_authorized) {return act;}          // 等桥回读
-    transitionTo(NodeState::Switching, in.now_ms, "请求桥切模式…");
-    // 迁移守则：→2 只能从 1 进。所以先请求 HOLD，由 stepSwitching 再请求 TRACKING。
-    act.request_mode_hold = true;
+    if (!in.bridge_authorized) {return act;}
+    transitionTo(NodeState::Switching, in.now_ms, "请求 MIT TRACKING，等待实际回读");
+    act.request_mode_tracking = true;
     return act;
   }
 
   StateActions stepSwitching(const StateInputs & in) noexcept
   {
     StateActions act;
-    if (in.disable_requested) {
-      transitionTo(NodeState::Standby, in.now_ms, "用户取消（SWITCHING 阶段）");
-      act.request_mode_hold = true;      // 回到 HOLD 更安全
+    if (!in.state_fresh) {
+      transitionTo(NodeState::Fault, in.now_ms, "切换期间反馈失鲜");
       act.request_release_source = true;
-      return act;
+    } else if (!in.bridge_authorized) {
+      transitionTo(NodeState::Suspended, in.now_ms, "切换中失去授权");
+    } else if (in.bridge_mode_ok) {
+      transitionTo(NodeState::Standby, in.now_ms, "MIT TRACKING 待命保持（运动输入关闭）");
     }
-    if (!in.bridge_authorized) {
-      // 授权丢了（被抢占）⇒ 放弃切换，退回 STANDBY
-      transitionTo(NodeState::Standby, in.now_ms, "切换中失去授权，放弃");
-      act.request_release_source = true;
-      return act;
-    }
-    if (!in.bridge_mode_ok) {
-      // 第一次进来：HOLD 已请求，等 mode_ok；若 HOLD 都没成功，超时由外壳处理
-      if (!hold_requested_) {
-        hold_requested_ = true;
-        act.request_mode_hold = true;
-      }
-      return act;
-    }
-    // mode_ok 且我们请求的是 TRACKING
-    if (!tracking_requested_) {
-      tracking_requested_ = true;
-      act.request_mode_tracking = true;
-      detail_ = "已请求 MIT TRACKING，等回读…";
-      return act;
-    }
-    // HOLD 与 TRACKING 都已请求且回读 mode_ok ⇒ 可以进入 RUNNING
-    hold_requested_ = false;
-    tracking_requested_ = false;
-    transitionTo(NodeState::Running, in.now_ms, "已接管（MIT TRACKING）");
     return act;
   }
 
@@ -292,8 +243,7 @@ private:
     StateActions act;
     if (in.disable_requested) {
       transitionTo(NodeState::Standby, in.now_ms, "用户 disable");
-      act.request_mode_hold = true;      // 停发前先回 HOLD，避免松劲
-      act.request_release_source = true;
+      // 健康 disable 仅关闭目标输入，继续 MIT 保持。
       return act;
     }
     if (!in.state_fresh) {
@@ -302,11 +252,11 @@ private:
       act.log_error = true;
       return act;
     }
-    if (!in.bridge_authorized) {
-      transitionTo(NodeState::Suspended, in.now_ms, "被其它数据源抢占（已停发）");
+    if (!in.bridge_authorized || !in.bridge_mode_ok) {
+      transitionTo(NodeState::Suspended, in.now_ms, "失去授权或 MIT TRACKING（已停发）");
       return act;
     }
-    if (!in.target_fresh) {
+    if (state_ != NodeState::GravityCompensation && !in.target_fresh) {
       transitionTo(NodeState::Dwell, in.now_ms, "目标超时 → 低频保持");
       return act;
     }
@@ -316,17 +266,10 @@ private:
   StateActions stepSuspended(const StateInputs & in) noexcept
   {
     StateActions act;
-    if (in.disable_requested) {
-      transitionTo(NodeState::Standby, in.now_ms, "用户 disable（被抢占中）");
-      act.request_release_source = true;
-      return act;
-    }
-    if (in.bridge_authorized) {
-      // 重新拿回授权：**必须重新走一遍模式确认**，不能直接回 RUNNING
-      //（期间桥可能被切到别的模式）
-      transitionTo(NodeState::Arming, in.now_ms, "重新获得授权，重新确认模式");
+    // 不自动抢回控制权；显式 enable 才重新锁源。
+    if (in.enable_requested && in.state_fresh) {
+      transitionTo(NodeState::Arming, in.now_ms, "显式恢复，重新锁源");
       act.request_lock_source = true;
-      return act;
     }
     return act;
   }
@@ -336,12 +279,17 @@ private:
     StateActions act;
     if (in.disable_requested) {
       transitionTo(NodeState::Standby, in.now_ms, "用户 disable（DWELL）");
-      act.request_mode_hold = true;
-      act.request_release_source = true;
+      // DWELL → STANDBY 保留 MIT TRACKING 与授权。
       return act;
     }
-    if (!in.bridge_authorized) {
-      transitionTo(NodeState::Suspended, in.now_ms, "DWELL 中被抢占");
+    if (!in.state_fresh) {
+      transitionTo(NodeState::Fault, in.now_ms, "DWELL 中 /joint_states 失鲜");
+      act.request_release_source = true;
+      act.log_error = true;
+      return act;
+    }
+    if (!in.bridge_authorized || !in.bridge_mode_ok) {
+      transitionTo(NodeState::Suspended, in.now_ms, "DWELL 失去授权或 MIT TRACKING");
       return act;
     }
     if (in.target_fresh) {
@@ -360,7 +308,9 @@ private:
         detail_ = "clear_fault 被拒：/joint_states 仍不新鲜";
         return act;
       }
-      transitionTo(NodeState::Standby, in.now_ms, "已清除故障（需重新 enable）");
+      run_requested_ = false;
+      transitionTo(NodeState::Arming, in.now_ms, "已清故障，重建待命保持；运动需重新 enable");
+      act.request_lock_source = true;
     }
     return act;
   }
@@ -371,7 +321,7 @@ private:
     detail_ = why;
     last_change_ms_ = now_ms;
     ++transitions_;
-    if (s == NodeState::Running) {hold_requested_ = false; tracking_requested_ = false;}
+    if (s == NodeState::Fault || s == NodeState::Suspended) {run_requested_ = false;}
   }
 
   NodeState state_{NodeState::Idle};
@@ -383,9 +333,7 @@ private:
   bool bridge_authorized_{false};
   bool bridge_mode_ok_{false};
 
-  // SWITCHING 的两步去重（避免每拍重复请求同一个模式）
-  bool hold_requested_{false};
-  bool tracking_requested_{false};
+  bool run_requested_{false};
 };
 
 }  // namespace lite_move_controller

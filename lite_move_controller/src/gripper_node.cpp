@@ -30,6 +30,7 @@
 #include <cmath>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -74,6 +75,12 @@ public:
     }
     if (upper_limits_.size() < num_joints) {
       upper_limits_.resize(num_joints, 0.047);
+    }
+    for (std::size_t i = 0; i < num_joints; ++i) {
+      if (!std::isfinite(lower_limits_[i]) || !std::isfinite(upper_limits_[i]) ||
+          lower_limits_[i] >= upper_limits_[i]) {
+        throw std::invalid_argument("夹爪开度限位必须有限且 lower < upper");
+      }
     }
 
     target_positions_.assign(num_joints, 0.0);
@@ -186,10 +193,14 @@ private:
     std::lock_guard<std::mutex> lock(mutex_);
     sensor_msgs::msg::JointState out;
     out.header.stamp = now();
-    out.name = gripper_joints_;
-    out.position = target_positions_;
-    out.velocity.assign(gripper_joints_.size(), 0.0);
-    out.effort.assign(gripper_joints_.size(), 0.0);
+    for (std::size_t i = 0; i < gripper_joints_.size(); ++i) {
+      if (!target_initialized_[i]) {continue;}
+      out.name.push_back(gripper_joints_[i]);
+      out.position.push_back(std::clamp(target_positions_[i], lower_limits_[i], upper_limits_[i]));
+      out.velocity.push_back(0.0);
+      out.effort.push_back(0.0);
+    }
+    if (out.name.empty()) {return;}
     pub_gripper_cmd_->publish(out);
   }
 
@@ -217,4 +228,3 @@ int main(int argc, char ** argv)
   rclcpp::shutdown();
   return 0;
 }
-

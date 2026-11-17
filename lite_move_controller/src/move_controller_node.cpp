@@ -65,6 +65,7 @@
 #include "lite_move_controller/impedance.hpp"
 #include "lite_ik_node/ik_backend.hpp"
 #include "lite_ik_node/ik_kdl.hpp"
+#include <urdf_parser/urdf_parser.h>
 #include "lite_move_controller/gripper.hpp"
 #include "lite_ik_node/ik_moveit.hpp"
 #include "lite_move_controller/input_filter.hpp"
@@ -261,6 +262,15 @@ public:
     //    它从 URDF 抽关节限位，早于 URDF ⇒ 拿到空串 ⇒ 静默退回默认 ±3.2 rad。
     setupLimitGuard(urdf_text_);
     setupArms();
+    if (control_mode_ == "gravity_compensation") {
+      const auto expected = (!get_parameter("joints_left").as_string_array().empty() ? 1u : 0u) +
+                            (!get_parameter("joints_right").as_string_array().empty() ? 1u : 0u);
+      if (arms_.size() != expected || std::any_of(arms_.begin(), arms_.end(),
+          [](const ArmRuntime & a) {return !a.dyn_ready;})) {
+        load_error_ = "纯重力补偿要求每条配置手臂的动力学参数加载成功";
+        return false;
+      }
+    }
     if (arms_.empty()) {
       // 建臂全失败（关节名对不上 / URDF 缺 link / 插件与 KDL 都建不起来 ……）
       // ⚠️ 这也是 fail-closed：arms=0 的节点接不了任何目标，继续跑只会让上游
@@ -432,6 +442,8 @@ private:
     frame_id_ = get_parameter("frame_id").as_string();
     control_mode_ = get_parameter("control_mode").as_string();
     control_rate_hz_ = get_parameter("control_rate_hz").as_double();
+    ik_rate_hz_ = get_parameter("ik_rate_hz").as_double();
+    use_external_ik_ = get_parameter("use_external_ik").as_bool();
     dwell_rate_hz_ = get_parameter("dwell_rate_hz").as_double();
     command_timeout_ms_ = get_parameter("command_timeout_ms").as_double();
     target_timeout_ms_ = get_parameter("target_timeout_ms").as_double();
@@ -504,16 +516,19 @@ private:
     }
 
     if (control_mode_ != "regular" && control_mode_ != "admittance" &&
-        control_mode_ != "impedance") {
-      load_error_ = "control_mode 必须是 regular / admittance / impedance，得到 '" +
+        control_mode_ != "impedance" && control_mode_ != "gravity_compensation") {
+      load_error_ = "control_mode 必须是 regular / admittance / impedance / gravity_compensation，得到 '" +
                     control_mode_ + "'";
       return false;
     }
-    if (!(control_rate_hz_ > 0.0) || !(dwell_rate_hz_ > 0.0)) {
+    if (control_mode_ == "gravity_compensation") {use_external_ik_ = false;}
+    if (!(control_rate_hz_ > 0.0) || !(dwell_rate_hz_ > 0.0) ||
+        !std::isfinite(control_rate_hz_) || !std::isfinite(dwell_rate_hz_)) {
       load_error_ = "control_rate_hz / dwell_rate_hz 必须为正";
       return false;
     }
-    if (!(ik_rate_hz_ > 0.0) || (ik_rate_hz_ > control_rate_hz_)) {
+    if (!(ik_rate_hz_ > 0.0) || !std::isfinite(ik_rate_hz_) ||
+        (ik_rate_hz_ > control_rate_hz_)) {
       load_error_ = "ik_rate_hz 必须为正且 ≤ control_rate_hz";
       return false;
     }
@@ -648,7 +663,7 @@ private:
     //    目标回调被同组的阻塞回调（状态 tick 的桥服务、get_status 服务）压住，
     //    "最后一个被接受目标"的年龄间歇 > target_timeout_ms(200 ms)。
     {
-      const bool use_ext_ik = get_parameter("use_external_ik").as_bool();
+      const bool use_ext_ik = use_external_ik_;
       rclcpp::SubscriptionOptions tgt_opt;
       tgt_opt.callback_group = target_cb_group_;   // 独立组（见上）
       if (!use_ext_ik) {
@@ -670,15 +685,19 @@ private:
       gripper_cmd_sub_ = create_subscription<sensor_msgs::msg::JointState>(
           gripper_command_topic_, rclcpp::QoS(10).reliable(),
           [this](const sensor_msgs::msg::JointState::SharedPtr m) {
+            if (control_mode_ == "gravity_compensation" ||
+                (sm_.state() != NodeState::Running && sm_.state() != NodeState::Dwell)) {return;}
             std::lock_guard<std::mutex> lock(gripper_cmd_mtx_);
             for (std::size_t k = 0; k < m->name.size(); ++k) {
               if (k >= m->position.size()) {break;}
               const auto & name = m->name[k];
-              for (std::size_t i = 0; i < gripper_joints_.size(); ++i) {
-                if (gripper_joints_[i] == name && i < gripper_cmds_.size()) {
+              for (std::size_t i = 0; i < gripper_idx_.size(); ++i) {
+                const auto idx = gripper_idx_[i];
+                if (canonical_joints_[idx] == name) {
                   const double pos = m->position[k];
                   if (std::isfinite(pos)) {
-                    gripper_cmds_[i].position = pos;
+                    gripper_cmds_[i].position = std::clamp(
+                        pos, guard_.limits().position_min[idx], guard_.limits().position_max[idx]);
                     gripper_pos_initialized_[i] = true;
                   }
                   break;
@@ -731,7 +750,7 @@ private:
             res->ik_backend = backend.empty()
                               ? std::string("kdl_parser/orocos-kdl (process-internal)")
                               : backend;
-            res->dynamics_params_path = get_parameter("params_json").as_string();
+            res->dynamics_params_path = dynamics_params_path_;
             // ⚠️ 现场排查第一件事："它到底用了哪份 URDF"。放在 message 里
             //    （move_msgs 是别的包，**不能**为这个加字段）。
             // ⚠️ 这里同时把"状态 tick 的耗时分布 + 关节状态年龄"报出来（运行时
@@ -1275,6 +1294,7 @@ private:
       return false;
     }
     arm.dyn_ready = true;
+    dynamics_params_path_ = std::filesystem::absolute(params_json).string();
     if (!arm.dyn.unmatchedLinks().empty()) {
       RCLCPP_WARN(get_logger(),
                   "臂 '%s'：%zu 个连杆名对不上（已置零惯量）：",
@@ -1386,8 +1406,19 @@ private:
   // -------------------------------------------------------------- 目标
   void onTarget(const move_msgs::msg::MoveTargetArray::SharedPtr msg)
   {
+    if (sm_.state() != NodeState::Running && sm_.state() != NodeState::Dwell) {return;}
+    if (control_mode_ == "gravity_compensation") {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "纯重力补偿状态拒绝运动目标");
+      return;
+    }
+    std::lock_guard<std::mutex> arm_lock(arm_state_mtx_);
     const std::int64_t now = steadyNowMs();
     for (const auto & t : msg->targets) {
+      if (t.target_type != move_msgs::msg::MoveTarget::TARGET_JOINTS) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+          "运控下发层只接收关节目标；位姿目标需要启用独立 IK（不回退内部 IK）");
+        continue;
+      }
       const std::string arm_name = t.arm;
       ArmRuntime * arm = findArm(arm_name);
       if (arm == nullptr) {
@@ -1735,19 +1766,19 @@ private:
     std::int64_t state_age_ms = -1;
     if (bridge_ != nullptr) {
       BridgeStatusLite st;
-      if (bridge_->getStatus(st, kStateTickStatusBudgetSec)) {
+      if (bridge_->getStatus(st, kStateTickStatusBudgetSec) && st.ok) {
+        last_bridge_status_ms_ = steadyNowMs();
+        if (st.safety_level >= 2 || st.arbitration_state_name == "FAULT") {
+          fail("底层安全故障：" + st.message);
+        }
         bridge_active_source_ = st.active_source;
         bridge_manual_override_ = st.manual_override;
         // ↓ 原 pollBridge() 的职责（每拍读一次就够，别调两遍服务）
         bridge_arbitration_state_ = st.arbitration_state_name;
         bridge_mode_name_ = st.mode_name;
         bridge_mode_ = st.mode;
-        // ⚠️ `bridge_mode_ok_` 只在这里**下调**，绝不置 true：
-        //    置 true 只能由 `set_mode` 的**回读**决定（见下面 request_mode_* 分支）。
-        //    否则 `SWITCHING` 的"先 HOLD 再 TRACKING"两步走会被下一拍清成 false
-        //    ⇒ 切换永久卡死（HOLD 回读 mode==1，而 TRACKING 判据 mode==2 尚未满足）。
-        // ⚠️ 必须把 HOLD(1) 也算 OK：SWITCHING 第一步成功后要靠它放行第二步。
-        if (st.mode != 1 && st.mode != 2) {bridge_mode_ok_ = false;}
+        bridge_mode_ok_ = st.protocol == 0 && st.mode == 2 && st.controller_active;
+
       } else {
         // 超时只计数（诊断用），**不**在这一拍里重试 —— 重试就是又一次阻塞。
         ++status_timeouts_;
@@ -1773,6 +1804,11 @@ private:
     in.clear_fault_requested = clear_fault_requested_;
     in.state_fresh = bridge_ && bridge_->stateReady() && state_age_ms >= 0 &&
                      state_age_ms <= static_cast<std::int64_t>(state_timeout_ms_);
+    if (in.state_fresh) {
+      const auto reason = measuredArmViolation(bridge_->snapshot());
+      if (!reason.empty()) {fail(reason);}
+    }
+    in.gravity_compensation = control_mode_ == "gravity_compensation";
     in.target_fresh = anyTargetFresh(now_fresh);
     // ⚠️⚠️ 授权判据**不能只看 `active_source`**。
     //
@@ -1787,6 +1823,15 @@ private:
     // `active_source` 是"**正在**持有"的运行时状态，接管完成（RUNNING）后自然会填上。
     in.bridge_authorized = (bridge_active_source_ == source_name_) ||
                            (bridge_manual_override_ == source_name_);
+    if (count_publishers(command_topic_) > 1 || count_publishers("~/status") > 1 ||
+        count_publishers("/robot_description") > 1) {
+      fail("发现重复的运动命令/状态/机器人描述发布者；请隔离 ROS_DOMAIN_ID 与发现范围");
+    }
+    if (last_bridge_status_ms_ > 0 && now_fresh - last_bridge_status_ms_ > state_timeout_ms_) {
+      fail("桥状态回读失鲜");
+    }
+    output_ready_.store(in.bridge_authorized && bridge_mode_ok_ && violation_.empty(),
+                        std::memory_order_release);
     in.bridge_mode_ok = bridge_mode_ok_;
     if (!violation_.empty()) {in.violation = violation_;}
 
@@ -1832,27 +1877,20 @@ private:
                     st.active_source.c_str(), st.arbitration_state_name.c_str());
       }
     }
-    if (act.request_mode_hold) {
-      BridgeStatusLite st;
-      if (!bridge_->setMode(255 /*KEEP*/, 1 /*HOLD*/, false, st, 15.0) || !st.ok) {
-        fail("切 MIT HOLD 失败：" + st.message);
-      } else {
-        bridge_mode_ok_ = st.controller_active && st.mode == 1;
-        RCLCPP_INFO(get_logger(), "已切 HOLD（回读 mode=%u %s active=%d）", st.mode,
-                    st.mode_name.c_str(), static_cast<int>(st.controller_active));
-      }
-    }
     if (act.request_mode_tracking) {
       BridgeStatusLite st;
       if (!bridge_->setMode(255, 2 /*TRACKING*/, false, st, 15.0) || !st.ok) {
         fail("切 MIT TRACKING 失败：" + st.message);
       } else {
         bridge_mode_ok_ = st.controller_active && st.mode == 2;
+        output_ready_.store(bridge_mode_ok_ && in.bridge_authorized && violation_.empty(),
+                            std::memory_order_release);
         RCLCPP_INFO(get_logger(), "已切 TRACKING（回读 mode=%u %s active=%d）", st.mode,
                     st.mode_name.c_str(), static_cast<int>(st.controller_active));
       }
     }
     if (act.request_release_source) {
+      output_ready_.store(false, std::memory_order_release);
       BridgeStatusLite st;
       if (bridge_->setSource(0 /*AUTO*/, "", 0.0, st, 10.0)) {
         bridge_active_source_ = st.active_source;
@@ -1948,13 +1986,35 @@ private:
     violation_ = why;
   }
 
+  std::string measuredArmViolation(const JointSnapshot & snap) const
+  {
+    if (!snap.covers(canonical_joints_.size())) {return "关节反馈不完整";}
+    const auto & limits = guard_.limits();
+    if (limits.size() != canonical_joints_.size()) {return "关节限位尚未就绪";}
+    // 仅容许编码器量化/端点标定误差；不能把越界实测裁剪后当作原地保持目标。
+    constexpr double tolerance = 0.01;
+    for (const auto & arm : arms_) {
+      for (std::size_t j = 0; j < arm.joints.size(); ++j) {
+        const auto k = arm.offset + j;
+        const auto q = snap.position[k];
+        if (!std::isfinite(q) || q < limits.position_min[k] - tolerance ||
+            q > limits.position_max[k] + tolerance) {
+          return "实测关节越界，禁止接管/继续运动：" + arm.joints[j] + "=" +
+                 std::to_string(q) + "，范围 [" + std::to_string(limits.position_min[k]) +
+                 ", " + std::to_string(limits.position_max[k]) + "]；请核对姿态和标定";
+        }
+      }
+    }
+    return {};
+  }
+
   // ------------------------------------------------------ 控制 tick（实时）
   void onControlTick()
   {
     if (bridge_ == nullptr) {return;}
     const std::int64_t now = steadyNowMs();
     const NodeState st = sm_.state();
-    if (!statePublishes(st)) {return;}          // 不发帧（让桥超时 → SAFE_HOLD）
+    if (!statePublishes(st) || !output_ready_.load(std::memory_order_acquire)) {return;}          // 不发帧（让桥超时 → SAFE_HOLD）
     const auto tick_t0 = std::chrono::steady_clock::now();
 
     // ⚠️ DWELL 是"低频保持帧"（`statePublishesFullRate()` 为 false）：
@@ -1969,7 +2029,8 @@ private:
 
     const std::size_t n = canonical_joints_.size();
     const JointSnapshot snap = bridge_->snapshot();
-    if (!snap.covers(n)) {return;}              // 没有可信实测就不动
+    if (!snap.covers(n) || now - snap.stamp_ms > state_timeout_ms_) {return;}              // 没有可信实测就不动
+    if (!measuredArmViolation(snap).empty()) {return;}  // 状态线程负责报告故障；当前拍立即停发。
 
     // 接管前复位（控制线程内执行，见 onStateTick 的说明）。首帧必须是实测。
     if (reset_runtime_requested_.exchange(false, std::memory_order_acq_rel)) {
@@ -1989,7 +2050,27 @@ private:
     frame.stiffness.assign(n, kp_default_);
     frame.damping.assign(n, kd_default_);
 
-    if (statePublishesFullRate(st)) {
+    if (st == NodeState::GravityCompensation) {
+      std::lock_guard<std::mutex> arm_lock(arm_state_mtx_);
+      for (auto & a : arms_) {
+        const auto nj = a.joints.size();
+        const std::vector<double> q(snap.position.begin() + a.offset,
+                                    snap.position.begin() + a.offset + nj);
+        std::vector<double> tau;
+        if (!a.dyn_ready || !a.dyn.gravityTorque(q, tau) || tau.size() != nj) {
+          ++frames_rejected_;
+          return;  // 不能用零前馈冒充重力补偿；停发让桥回退。
+        }
+        for (std::size_t k = 0; k < nj; ++k) {
+          frame.stiffness[a.offset + k] = 0.0;
+          frame.damping[a.offset + k] = 1.0;
+          frame.effort[a.offset + k] = tau[k];
+        }
+        a.q_last = q;
+        a.have_last_solution = true;
+        a.tau_ff = tau;
+      }
+    } else if (st == NodeState::Running) {
       // ⚠️ **IK 重解与下发解耦**：下发节拍由 `control_rate_hz`（默认 100 Hz）驱动，
       //    IK 只在每条臂自己的 `ik_rate_hz`（默认 25 Hz）节拍上真调。其余拍子
       //    按**墙钟时间**沿 Hermite 段求值（不是"每 4 拍走 1/4"）。
@@ -2005,12 +2086,21 @@ private:
       //    每拍烧掉两个 50 ms 预算（实测状态 tick 136 ms、帧率掉到 7 Hz），
       //    而且 DWELL 的语义本来就是"顶住，不松劲"，不是"再解一次"。
       std::lock_guard<std::mutex> arm_lock(arm_state_mtx_);
-      for (const auto & a : arms_) {
+      for (auto & a : arms_) {
         if (!a.have_last_solution) {continue;}
         const std::size_t nj = a.joints.size();
         if (a.offset + nj > frame.size() || a.q_last.size() != nj) {continue;}
         for (std::size_t k = 0; k < nj; ++k) {
           frame.position[a.offset + k] = a.q_last[k];
+        }
+        // 待命/断流保持仍更新重力前馈，避免零前馈导致缓慢下沉。
+        if (a.dyn_ready && emit_ff_) {
+          const std::vector<double> q(snap.position.begin() + a.offset,
+                                      snap.position.begin() + a.offset + nj);
+          std::vector<double> tau;
+          if (!a.dyn.gravityTorque(q, tau) || tau.size() != nj) {++frames_rejected_; return;}
+          for (std::size_t k = 0; k < nj; ++k) {frame.effort[a.offset + k] = tau[k];}
+          a.tau_ff = tau;
         }
       }
     }
@@ -2070,6 +2160,11 @@ private:
       frame.damping[j] = alpha * frame.damping[j];
       frame.effort[j] = alpha * frame.effort[j];
     }
+    // 斜坡混入实测之后再次裁剪夹爪位置；不增加边界增益/力矩策略。
+    for (const auto k : gripper_idx_) {
+      frame.position[k] = std::clamp(frame.position[k],
+          guard_.limits().position_min[k], guard_.limits().position_max[k]);
+    }
     // 接管后首帧证据：命令与实测的最大差（应≈0；若很大就是"旧目标回放"）。
     for (auto & a : arms_) {
       if (a.first_cmd_logged || a.offset + a.joints.size() > frame.position.size()) {continue;}
@@ -2109,6 +2204,7 @@ private:
         a.prev_cmd.assign(frame.position.begin() + static_cast<long>(a.offset),
                           frame.position.begin() + static_cast<long>(a.offset + nj));
       }
+      last_frame_ = frame;
       if (worst > 0.0) {recordStep(worst);}
     }
   }
@@ -2217,6 +2313,18 @@ private:
     override_vec("torque_limit", lim.torque_max);
     override_vec("stiffness_limit", lim.stiffness_max);
     override_vec("damping_limit", lim.damping_max);
+
+    // 夹爪位置范围以驱动描述的 prismatic 限位为准；配置只能收紧，不能扩张。
+    const auto model = urdf::parseURDF(urdf);
+    for (const auto k : gripper_idx_) {
+      const auto joint = model ? model->getJoint(canonical_joints_[k]) : nullptr;
+      if (!joint || !joint->limits || !std::isfinite(joint->limits->lower) ||
+          !std::isfinite(joint->limits->upper) || joint->limits->lower >= joint->limits->upper) {
+        throw std::runtime_error("夹爪 URDF 限位不可用：" + canonical_joints_[k]);
+      }
+      lim.position_min[k] = std::max(lim.position_min[k], joint->limits->lower);
+      lim.position_max[k] = std::min(lim.position_max[k], joint->limits->upper);
+    }
 
     // ⚠️ 夹爪力矩上限与增益上限约束：
     //    力矩上限按启动参数 gripper_torque_limit（默认 0.25 N·m）严格截断，
@@ -2376,7 +2484,7 @@ private:
           tmp_exec.spin_some(std::chrono::milliseconds(20));
         }
       });
-      got = bridge_->getStatus(st, 5.0);
+      got = bridge_->getStatus(st, 10.0);
       stop.store(true, std::memory_order_release);
       spinner.join();
       tmp_exec.remove_node(shared_from_this());
@@ -2385,7 +2493,7 @@ private:
       return false;
     }
     if (!got || !st.ok) {
-      err = "启动自检失败：拿不到 /lite_bridge 状态（bringup 未启动？）。请先启动：\n"
+      err = "启动自检失败：" + st.message + "；拿不到 /lite_bridge 状态。请先启动：\n"
             "    ros2 launch lite_bringup lite_bringup.launch.py \\\n"
             "        mode:=arms controller:=modes control_mode:=mit source_names:=" +
             source_name_ +
@@ -2464,7 +2572,9 @@ private:
   void resetArmRuntime(const JointSnapshot & snap)
   {
     std::lock_guard<std::mutex> lk(arm_state_mtx_);
-    ramp_elapsed_ = 0.0;
+    if (sm_.state() != NodeState::Standby || last_frame_.size() != canonical_joints_.size()) {
+      ramp_elapsed_ = 0.0;
+    }
     for (auto & a : arms_) {
       a.filter.reset();
       a.have_target = false;
@@ -2484,7 +2594,7 @@ private:
       a.exact = true;
       a.saturated.clear();
       a.last_v.clear();
-      a.have_last_solution = false;
+      a.have_last_solution = snap.covers(canonical_joints_.size());
       a.q_goal.clear();
       a.tau_ff.clear();
       const std::size_t nj = a.joints.size();
@@ -2497,8 +2607,16 @@ private:
       a.q_seed = a.q_last;
       a.first_cmd_logged = false;
     }
-    RCLCPP_INFO(get_logger(),
-                "接管复位：filter/目标/IK/插值/q_last 全部清空，q_last=实测，ramp 从 0 开始");
+    {
+      std::lock_guard<std::mutex> grip_lock(gripper_cmd_mtx_);
+      for (std::size_t i = 0; i < gripper_idx_.size(); ++i) {
+        const auto k = gripper_idx_[i];
+        gripper_cmds_[i].position = std::clamp(snap.position[k],
+            guard_.limits().position_min[k], guard_.limits().position_max[k]);
+        gripper_pos_initialized_[i] = true;
+      }
+    }
+    RCLCPP_INFO(get_logger(), "清除运动目标，保持基准重新锚定实测；待命不切 HOLD");
   }
 
   /// 关节模式：从当前下发值**平滑走到关节目标**（预摆位/回位），不走 IK。
@@ -3018,8 +3136,8 @@ private:
     //    `bridge_->snapshot()` 在锁内调用是安全的（它自己有锁，且不会回调本节点）。
     std::lock_guard<std::mutex> arm_lock(arm_state_mtx_);
     s.header.stamp = now();
-    s.state = static_cast<std::uint8_t>(sm_.state());
-    s.state_name = nodeStateName(sm_.state());
+    s.state = static_cast<std::uint8_t>(publicNodeState(sm_.state()));
+    s.state_name = nodeStateName(publicNodeState(sm_.state()));
     s.state_detail = sm_.detail();
     s.control_mode = control_mode_;
     s.dynamics_model = dyn_model_kind_.empty() ? "unavailable" : dyn_model_kind_;
@@ -3046,6 +3164,12 @@ private:
         const std::size_t j = a.offset + k;
         if (j < s.q_desired.size()) {s.q_desired[j] = a.prev_cmd[k];}
       }
+    }
+    if (last_frame_.size() == canonical_joints_.size()) {
+      s.q_desired = last_frame_.position;
+      s.tau_model = last_frame_.effort;
+      s.stiffness = last_frame_.stiffness;
+      s.damping = last_frame_.damping;
     }
     s.tau_measured = snap.effort;
     for (const auto & a : arms_) {
@@ -3101,6 +3225,13 @@ private:
   void onIkQuery(const std::shared_ptr<move_msgs::srv::QueryIk::Request> req,
                  std::shared_ptr<move_msgs::srv::QueryIk::Response> res)
   {
+    if (!use_external_ik_) {
+      res->ok = false;
+      res->message = "IK 已关闭；不执行逆解查询";
+      res->ik_status = static_cast<std::uint8_t>(SolverOutcome::Failed);
+      res->ik_status_name = "FAILED";
+      return;
+    }
     ArmRuntime * arm = nullptr;
     if (!req->arm.empty()) {
       arm = findArm(req->arm);
@@ -3135,7 +3266,8 @@ private:
         r.seed = neutralSeedFor(*arm);
       }
     }
-    if (arm->have_last_solution) {
+    // 查询显式种子决定逆解分支，不能被当前保持目标抢先覆盖。
+    if (req->seed_joints.size() != arm->joints.size() && arm->have_last_solution) {
       r.has_last_solution = true;
       r.last_solution = arm->q_last;
     }
@@ -3162,6 +3294,9 @@ private:
   std::string source_name_, command_topic_, joint_states_topic_;
   std::vector<std::string> canonical_joints_, arm_names_;
   std::string root_link_, control_mode_, frame_id_;
+  std::string dynamics_params_path_;
+  bool use_external_ik_{true};
+  JointCommandFrame last_frame_;  // arm_state_mtx_ 保护，用于公开状态回读。
   /// 夹爪（prismatic）：名字（参数原样）、在 canonical 里的下标、独立命令。
   /// ⚠️ `gripper_idx_` 为空 = canonical 里没有夹爪 ⇒ 控制帧里不碰这些关节。
   std::vector<std::string> gripper_joints_;
@@ -3264,6 +3399,8 @@ private:
   std::string bridge_mode_name_;
   std::uint8_t bridge_mode_{255};
   bool bridge_mode_ok_{false};
+  std::atomic<bool> output_ready_{false};
+  std::int64_t last_bridge_status_ms_{0};
   std::uint64_t target_timeouts_{0};
   std::uint64_t frames_rejected_{0};
 

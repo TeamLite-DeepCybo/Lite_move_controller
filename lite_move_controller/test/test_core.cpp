@@ -458,237 +458,84 @@ static void test_limit_guard()
 // ⑥ node_state
 // ---------------------------------------------------------------------------
 
-//: 测试里模拟"桥的回读"：桥状态是**粘性**的（外壳每拍从服务回读后填入）。
-//: ⚠️ 这正是修掉那个 bug 后的语义：桥状态**只有一个来源**（入参），
-//:    不再有"note*() 写成员 + 读入参"两条路可 以分叉。
-static bool g_bridge_authorized = false;
-static bool g_bridge_mode_ok = false;
-
-static StateInputs base_inputs(std::int64_t t)
+static void enter_standby(NodeStateMachine & m, StateInputs & in)
 {
-  StateInputs in;
-  in.now_ms = t;
-  in.load_ok = true;
-  in.state_fresh = true;
-  in.target_fresh = true;
-  in.bridge_authorized = g_bridge_authorized;
-  in.bridge_mode_ok = g_bridge_mode_ok;
-  return in;
+  in = StateInputs{}; in.load_ok = true; in.state_fresh = true;
+  m.tick(in);
+  auto act = m.tick(in);
+  CHECK(m.state() == NodeState::Arming && act.request_lock_source, "启动必须先锁源");
+  in.bridge_authorized = true;
+  act = m.tick(in);
+  CHECK(m.state() == NodeState::Switching && act.request_mode_tracking, "直接请求 MIT TRACKING");
+  act = m.tick(in);
+  CHECK(m.state() == NodeState::Switching && !act.request_mode_tracking, "等待实际回读，不重复切换");
+  in.bridge_mode_ok = true; m.tick(in);
+  CHECK(m.state() == NodeState::Standby && statePublishes(m.state()), "待命必须具备 MIT 保持输出");
 }
 
 static void test_node_state()
 {
   std::printf("[node_state]\n");
-  g_bridge_authorized = false;
-  g_bridge_mode_ok = false;
-  {
-    // 不发帧的状态集合必须精确
-    CHECK(!statePublishes(NodeState::Standby), "STANDBY 不得发帧（会松劲）");
-    CHECK(!statePublishes(NodeState::Fault), "FAULT 不得发帧");
-    CHECK(!statePublishes(NodeState::Suspended), "SUSPENDED 不得发帧");
-    CHECK(!statePublishes(NodeState::Arming), "ARMING 不得发帧");
-    CHECK(statePublishes(NodeState::Running), "RUNNING 必须发帧");
-    CHECK(statePublishes(NodeState::Dwell), "DWELL 必须发保持帧");
-    CHECK(statePublishesFullRate(NodeState::Running), "RUNNING 全速");
-    CHECK(!statePublishesFullRate(NodeState::Dwell), "DWELL 低频");
+  CHECK(statePublishesFullRate(NodeState::Standby), "待命持续保持，不能因断流退 HOLD");
+  CHECK(!statePublishes(NodeState::Fault), "故障不发帧");
+  CHECK(!statePublishes(NodeState::Suspended), "抢占不发帧");
+  CHECK(!statePublishes(NodeState::Arming), "无授权不发帧");
+  CHECK(!statePublishesFullRate(NodeState::Dwell), "DWELL 保留低频");
+  for (int scenario = 0; scenario < 8; ++scenario) {
+    NodeStateMachine m; StateInputs in; enter_standby(m, in);
+    in.target_fresh = true; m.tick(in);
+    CHECK(m.state() == NodeState::Standby, "未 enable 的目标不能启动运动");
+    in.enable_requested = true; m.tick(in); in.enable_requested = false;
+    CHECK(m.state() == NodeState::Running, "enable 开放运动，不切底层模式");
+    if (scenario == 0) {
+      in.disable_requested = true; const auto act = m.tick(in);
+      CHECK(m.state() == NodeState::Standby && !act.request_release_source && !act.request_mode_tracking,
+            "disable 保持 TRACKING，不交权");
+      in.disable_requested = false; m.tick(in);
+      CHECK(m.state() == NodeState::Standby, "旧目标不能重启");
+    } else if (scenario == 1) {
+      in.target_fresh = false; m.tick(in);
+      CHECK(m.state() == NodeState::Dwell, "断流进入 DWELL");
+      in.disable_requested = true; const auto act = m.tick(in);
+      CHECK(m.state() == NodeState::Standby && !act.request_release_source, "DWELL disable 保持授权");
+    } else if (scenario == 2 || scenario == 3) {
+      if (scenario == 2) {in.bridge_authorized = false;} else {in.bridge_mode_ok = false;}
+      m.tick(in); CHECK(m.state() == NodeState::Suspended, "授权/模式失效必须停发");
+      in.bridge_authorized = in.bridge_mode_ok = true; m.tick(in);
+      CHECK(m.state() == NodeState::Suspended, "不自动重启运动");
+    } else if (scenario == 4 || scenario == 5) {
+      if (scenario == 4) {in.disable_requested = true; m.tick(in); in.disable_requested = false;}
+      in.state_fresh = false; m.tick(in);
+      CHECK(m.state() == NodeState::Fault, "待命和运动都检查反馈失鲜");
+      in.clear_fault_requested = true; m.tick(in);
+      CHECK(m.state() == NodeState::Fault, "失鲜不能清故障");
+      in.state_fresh = true; m.tick(in); in.clear_fault_requested = false;
+      CHECK(m.state() == NodeState::Arming, "清故障重新建立待命保持");
+      m.tick(in); m.tick(in); m.tick(in);
+      CHECK(m.state() == NodeState::Standby, "清故障不重放运动");
+    } else if (scenario == 6) {
+      in.violation = "bridge fault"; const auto act = m.tick(in);
+      CHECK(m.state() == NodeState::Fault && act.request_release_source, "安全故障仍交权降级");
+    } else {
+      in.target_fresh = false; m.tick(in); in.state_fresh = false; m.tick(in);
+      CHECK(m.state() == NodeState::Fault, "DWELL 失鲜仍停发");
+    }
   }
-  {
-    // 全流程：IDLE→LOADING→STANDBY
-    NodeStateMachine m(0);
-    CHECK(m.state() == NodeState::Idle, "初始应为 IDLE");
-    m.tick(base_inputs(1));
-    CHECK(m.state() == NodeState::Loading, "load_ok=true 应进 LOADING，得到 %s",
-          nodeStateName(m.state()));
-    m.tick(base_inputs(2));
-    CHECK(m.state() == NodeState::Standby, "应进 STANDBY，得到 %s",
-          nodeStateName(m.state()));
-  }
-  {
-    // enable 但状态不新鲜 ⇒ **必须拒绝**（拿不到实测角就不能接管）
-    NodeStateMachine m(0);
-    auto in = base_inputs(1);
-    m.tick(in);
-    m.tick(base_inputs(2));
-    in = base_inputs(3);
-    in.enable_requested = true;
-    in.state_fresh = false;
-    m.tick(in);
-    CHECK(m.state() == NodeState::Standby, "状态不新鲜时 enable 必须被拒，得到 %s",
-          nodeStateName(m.state()));
-    CHECK(m.detail().find("不新鲜") != std::string::npos,
-          "应说明原因，得到：%s", m.detail().c_str());
-  }
-  {
-    // 完整接管链：ARMING → SWITCHING（两步：HOLD 再 TRACKING）→ RUNNING
-    NodeStateMachine m(0);
-    m.tick(base_inputs(1));
-    m.tick(base_inputs(2));
-    auto in = base_inputs(3);
-    in.enable_requested = true;
-    auto a = m.tick(in);
-    CHECK(m.state() == NodeState::Arming, "应进 ARMING");
-    CHECK(a.request_lock_source, "必须请求锁源");
+  NodeStateMachine invalid; StateInputs bad; bad.load_error = "invalid model"; invalid.tick(bad);
+  CHECK(invalid.state() == NodeState::Error, "载入失败不能出力");
+}
 
-    // 桥还没确认 ⇒ 停在 ARMING，不重复请求
-    a = m.tick(base_inputs(4));
-    CHECK(m.state() == NodeState::Arming, "未确认授权应停在 ARMING");
-    CHECK(!a.request_lock_source, "不得重复请求锁源");
-
-    // 桥确认 ⇒ 进 SWITCHING 并请求 HOLD
-    g_bridge_authorized = true;
-    a = m.tick(base_inputs(5));
-    CHECK(m.state() == NodeState::Switching, "应进 SWITCHING，得到 %s",
-          nodeStateName(m.state()));
-    CHECK(a.request_mode_hold, "第一步必须请求 HOLD（迁移守则：→2 只能从 1 进）");
-    CHECK(!a.request_mode_tracking, "第一步不得直接请求 TRACKING");
-
-    // HOLD 回读 ok ⇒ 请求 TRACKING
-    g_bridge_mode_ok = true;
-    a = m.tick(base_inputs(6));
-    CHECK(a.request_mode_tracking, "第二步必须请求 TRACKING");
-    CHECK(m.state() == NodeState::Switching, "此刻还没到 RUNNING");
-
-    // TRACKING 回读 ok ⇒ RUNNING
-    g_bridge_authorized = true;
-    g_bridge_mode_ok = true;
-    a = m.tick(base_inputs(7));
-    CHECK(m.state() == NodeState::Running, "应进 RUNNING，得到 %s",
-          nodeStateName(m.state()));
-  }
-  {
-    // RUNNING 中被抢占 ⇒ SUSPENDED 且**停发**
-    NodeStateMachine m(0);
-    m.tick(base_inputs(1));
-    m.tick(base_inputs(2));
-    auto in = base_inputs(3);
-    in.enable_requested = true;
-    m.tick(in);
-    g_bridge_authorized = true;
-    m.tick(base_inputs(4));
-    g_bridge_mode_ok = true;
-    m.tick(base_inputs(5));
-    g_bridge_authorized = true;
-    g_bridge_mode_ok = true;
-    m.tick(base_inputs(6));
-    CHECK(m.state() == NodeState::Running, "前置：应已 RUNNING");
-
-    in = base_inputs(7);
-    in.bridge_authorized = false;
-    g_bridge_authorized = false;
-    m.tick(in);
-    CHECK(m.state() == NodeState::Suspended, "被抢占应进 SUSPENDED，得到 %s",
-          nodeStateName(m.state()));
-    CHECK(!statePublishes(m.state()), "SUSPENDED 必须停发");
-  }
-  {
-    // 目标超时 ⇒ DWELL（继续发**低频保持帧**，不是停发）
-    NodeStateMachine m(0);
-    m.tick(base_inputs(1));
-    m.tick(base_inputs(2));
-    auto in = base_inputs(3);
-    in.enable_requested = true;
-    m.tick(in);
-    g_bridge_authorized = true;
-    m.tick(base_inputs(4));
-    g_bridge_mode_ok = true;
-    m.tick(base_inputs(5));
-    g_bridge_authorized = true;
-    g_bridge_mode_ok = true;
-    m.tick(base_inputs(6));
-    in = base_inputs(7);
-    in.target_fresh = false;
-    m.tick(in);
-    CHECK(m.state() == NodeState::Dwell, "目标超时应进 DWELL，得到 %s",
-          nodeStateName(m.state()));
-    CHECK(statePublishes(m.state()), "DWELL 必须继续发保持帧（不能塌）");
-    // 目标恢复 ⇒ 回 RUNNING
-    g_bridge_authorized = true;
-    m.tick(base_inputs(8));
-    CHECK(m.state() == NodeState::Running, "目标恢复应回 RUNNING");
-  }
-  {
-    // 违例 ⇒ FAULT，且要求交权；clear_fault 只能回 STANDBY（不能直接回 RUNNING）
-    NodeStateMachine m(0);
-    m.tick(base_inputs(1));
-    m.tick(base_inputs(2));
-    auto in = base_inputs(3);
-    in.violation = "位置超差 0.5 rad 持续 0.2 s";
-    auto a = m.tick(in);
-    CHECK(m.state() == NodeState::Fault, "违例应进 FAULT，得到 %s",
-          nodeStateName(m.state()));
-    CHECK(a.request_release_source, "进 FAULT 必须交权");
-    CHECK(a.log_error, "应报错");
-
-    in = base_inputs(4);
-    in.clear_fault_requested = true;
-    in.state_fresh = false;
-    m.tick(in);
-    CHECK(m.state() == NodeState::Fault, "状态不新鲜时 clear_fault 必须被拒");
-
-    in = base_inputs(5);
-    in.clear_fault_requested = true;
-    m.tick(in);
-    CHECK(m.state() == NodeState::Standby, "clear_fault 应回 STANDBY，得到 %s",
-          nodeStateName(m.state()));
-    CHECK(m.detail().find("重新 enable") != std::string::npos,
-          "应说明需要重新 enable，得到：%s", m.detail().c_str());
-  }
-  {
-    // 运行中状态失鲜 ⇒ FAULT（不能"用过期数据继续出力"）
-    NodeStateMachine m(0);
-    m.tick(base_inputs(1));
-    m.tick(base_inputs(2));
-    auto in = base_inputs(3);
-    in.enable_requested = true;
-    m.tick(in);
-    g_bridge_authorized = true;
-    m.tick(base_inputs(4));
-    g_bridge_mode_ok = true;
-    m.tick(base_inputs(5));
-    g_bridge_authorized = true;
-    g_bridge_mode_ok = true;
-    m.tick(base_inputs(6));
-    CHECK(m.state() == NodeState::Running, "前置：RUNNING");
-    in = base_inputs(7);
-    in.state_fresh = false;
-    m.tick(in);
-    CHECK(m.state() == NodeState::Fault, "运行中失鲜应进 FAULT，得到 %s",
-          nodeStateName(m.state()));
-  }
-  {
-    // load 失败 ⇒ ERROR，且不可恢复
-    NodeStateMachine m(0);
-    auto in = base_inputs(1);
-    in.load_ok = false;
-    in.load_error = "IK 插件加载失败";
-    m.tick(in);
-    CHECK(m.state() == NodeState::Error, "load 失败应进 ERROR，得到 %s",
-          nodeStateName(m.state()));
-    m.tick(base_inputs(2));
-    CHECK(m.state() == NodeState::Error, "ERROR 不应自行恢复");
-  }
-  {
-    // RUNNING 中 disable ⇒ 先请求 HOLD（避免松劲）再交权，回 STANDBY
-    NodeStateMachine m(0);
-    m.tick(base_inputs(1));
-    m.tick(base_inputs(2));
-    auto in = base_inputs(3);
-    in.enable_requested = true;
-    m.tick(in);
-    g_bridge_authorized = true;
-    m.tick(base_inputs(4));
-    g_bridge_mode_ok = true;
-    m.tick(base_inputs(5));
-    g_bridge_authorized = true;
-    g_bridge_mode_ok = true;
-    m.tick(base_inputs(6));
-    in = base_inputs(7);
-    in.disable_requested = true;
-    auto a = m.tick(in);
-    CHECK(m.state() == NodeState::Standby, "disable 应回 STANDBY");
-    CHECK(a.request_mode_hold, "disable 应先请求 HOLD（否则 MIT 会松劲塌下来）");
-    CHECK(a.request_release_source, "disable 应交权");
-  }
+static void test_gravity_state()
+{
+  std::printf("[gravity_state]\n");
+  NodeStateMachine m; StateInputs in; enter_standby(m, in);
+  in.gravity_compensation = true; in.enable_requested = true; m.tick(in);
+  in.enable_requested = false;
+  for (int i = 0; i < 100; ++i) {in.now_ms += 50; m.tick(in);}
+  CHECK(m.state() == NodeState::GravityCompensation, "重力模式不依赖目标");
+  CHECK(publicNodeState(m.state()) == NodeState::Running, "对外保持既有枚举");
+  in.disable_requested = true; const auto act = m.tick(in);
+  CHECK(m.state() == NodeState::Standby && !act.request_release_source, "补偿 disable 回 MIT 待命保持");
 }
 
 int main()
@@ -699,6 +546,7 @@ int main()
   test_impedance();
   test_limit_guard();
   test_node_state();
+  test_gravity_state();
   std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

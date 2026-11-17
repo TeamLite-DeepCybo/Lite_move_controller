@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <future>
 #include <thread>
 
@@ -83,6 +84,9 @@ void BridgeClient::onJointStates(const sensor_msgs::msg::JointState::SharedPtr m
   for (std::size_t i = 0; i < msg->name.size(); ++i) {
     for (std::size_t k = 0; k < n; ++k) {
       if (msg->name[i] != canonical_joints_[k]) {continue;}
+      if (i >= msg->position.size() || i >= msg->velocity.size() ||
+          i >= msg->effort.size() || !std::isfinite(msg->position[i]) ||
+          !std::isfinite(msg->velocity[i]) || !std::isfinite(msg->effort[i])) {continue;}
       if (i < msg->position.size()) {p[k] = msg->position[i];}
       if (i < msg->velocity.size()) {v[k] = msg->velocity[i];}
       if (i < msg->effort.size()) {e[k] = msg->effort[i];}
@@ -221,10 +225,10 @@ bool BridgeClient::getStatus(BridgeStatusLite & out, double timeout_sec)
   out = BridgeStatusLite{};
   // ⚠️ `wait_for_service` 也必须吃**同一个**预算（原来写死 3 s）：
   //    状态 tick 每拍都会调本函数，若桥的服务暂时没被发现，写死的 3 s 会让
-  //    tick 直接卡死 3 s（比 waitFuture 那 2 s 还糟）。这里取 min(预算, 3 s)：
+  //    tick 直接卡死 3 s（比 waitFuture 那 2 s 还糟）。这里使用调用方预算：
   //    状态 tick 传 0.05 ⇒ 最多 50 ms；ARMING/SWITCHING 的 setSource/setMode
   //    仍各自保留 3 s 的服务发现预算（它们不是热路径）。
-  const double svc_wait = std::min(timeout_sec, 3.0);
+  const double svc_wait = timeout_sec;
   if (!get_status_cli_->wait_for_service(std::chrono::duration<double>(svc_wait))) {
     out.message = "服务不可用：/lite_bridge/get_status";
     return false;
@@ -236,12 +240,14 @@ bool BridgeClient::getStatus(BridgeStatusLite & out, double timeout_sec)
     return false;
   }
   const auto res = fut.get();
-  out.ok = true;
+  out.ok = res->ok;
+  out.message = res->message;
   out.protocol = res->protocol;
   out.protocol_name = res->protocol_name;
   out.mode = res->mode;
   out.mode_name = res->mode_name;
   out.controller_active = res->controller_active;
+  out.safety_level = res->safety_level;
   out.active_controller = res->active_controller;
   out.active_source = res->active_source;
   // ⚠️⚠️ 这一行是**时序关键**，不能省：

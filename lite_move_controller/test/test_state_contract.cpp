@@ -36,4 +36,9 @@ static_assert(static_cast<std::uint8_t>(lite_move_controller::NodeState::Fault) 
 static_assert(static_cast<std::uint8_t>(lite_move_controller::NodeState::Error) ==
               MoveStatus::STATE_ERROR, "NodeState::Error 必须 == STATE_ERROR");
 
-int main() {return 0;}
+static_assert(static_cast<std::uint8_t>(lite_move_controller::NodeState::Running) ==
+              MoveStatus::STATE_RUNNING, "重力补偿对外使用已有 RUNNING 值");
+int main() {
+  return lite_move_controller::publicNodeState(lite_move_controller::NodeState::GravityCompensation)
+      == lite_move_controller::NodeState::Running ? 0 : 1;
+}

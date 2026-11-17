@@ -91,7 +91,7 @@ def generate_launch_description():
         description='参数 YAML（默认包内 config/lite_move_controller.yaml）。')
     mode_arg = DeclareLaunchArgument(
         'mode', default_value='regular',
-        description="控制律：regular / admittance / impedance（**启动期固定**）。")
+        description="控制律：regular / admittance / impedance / gravity_compensation（**启动期固定**）。")
     joint_mode_arg = DeclareLaunchArgument(
         'joint_mode', default_value='arms',
         description="关节集合，必须与 lite_bringup 的 mode:= 一致：arms（14）/ arms_grippers（16）。")
@@ -100,7 +100,7 @@ def generate_launch_description():
         description='数据源名（必须已写进 bringup 的 source_names）。')
     params_json_arg = DeclareLaunchArgument(
         'params_json', default_value='',
-        description='lite_dyid 的 params.json（空 = 不发动力学前馈）。')
+        description='动力学参数（空 = 使用包内 config/dynamics/identified_params.json）。')
     urdf_arg = DeclareLaunchArgument(
         'urdf_path', default_value='',
         description='URDF 路径（空 = 用 /robot_description）。')
@@ -110,6 +110,9 @@ def generate_launch_description():
     rate_arg = DeclareLaunchArgument(
         'control_rate_hz', default_value='100.0',
         description='控制周期（Hz）。')
+    ik_rate_arg = DeclareLaunchArgument(
+        'ik_rate_hz', default_value='',
+        description='独立 IK 求解频率；空 = 参数文件，默认 25 Hz。')
     enable_ik_node_arg = DeclareLaunchArgument(
         'enable_ik_node', default_value='true',
         description='是否启动独立的微分逆解节点 lite_ik_node（默认 true：使用 DLS 微分逆解 + 零空间避限位）。')
@@ -140,6 +143,12 @@ def generate_launch_description():
             return s(name).lower() in ('1', 'true', 'yes', 'on')
 
         jm = s('joint_mode')
+        if jm not in ('arms', 'arms_grippers'):
+            raise ValueError('joint_mode 必须是 arms 或 arms_grippers')
+        use_ik = b('enable_ik_node') and s('mode') != 'gravity_compensation'
+        with open(s('params_file'), encoding='utf-8') as fh:
+            config = (yaml.safe_load(fh) or {}).get('lite_move_controller', {}).get('ros__parameters', {})
+        ik_rate = float(s('ik_rate_hz') or config.get('ik_rate_hz', 25.0))
         canonical = _canonical(jm)
         # ⚠️ `joints_left/right` **永远**是 7 个臂关节（IK 链只有 7 个 revolute）。
         #    旧版在 arms_grippers 下把它们塞成 8 个（含夹爪）⇒ 节点拿 8 个关节
@@ -165,14 +174,18 @@ def generate_launch_description():
             'control_rate_hz': float(s('control_rate_hz')),
             'urdf_path': s('urdf_path'),
             'auto_enable': b('auto_enable'),
-            'use_external_ik': b('enable_ik_node'),
+            'use_external_ik': use_ik,
+            'ik_rate_hz': ik_rate,
         }
         if jm == 'arms_grippers':
             params['gripper_joints'] = ['left_gripper', 'right_gripper']
         # ⚠️ `params_json` **只在显式给出时**才注入：空串会覆盖 YAML/节点里的
         #    默认辨识路径（默认开启动力学前馈），把前馈静默关掉。
-        if s('params_json'):
-            params['params_json'] = s('params_json')
+        dynamics_path = s('params_json') or config.get(
+            'params_json', 'config/dynamics/identified_params.json')
+        if dynamics_path == 'config/dynamics/identified_params.json':
+            dynamics_path = FindPackageShare('lite_move_controller').perform(context) + '/' + dynamics_path
+        params['params_json'] = dynamics_path
 
         with tempfile.NamedTemporaryFile(
                 mode='w', prefix='lmc_params_', suffix='.yaml',
@@ -210,7 +223,7 @@ def generate_launch_description():
                     'output_topic': '/lite_move_controller/gripper_command',
                 }],
             ))
-        if b('enable_ik_node'):
+        if use_ik:
             ik_share = FindPackageShare('lite_ik_node').perform(context)
             ik_params = {
                 'input_target_topic': '/lite_move_controller/task_target',
@@ -219,6 +232,7 @@ def generate_launch_description():
                 'joints_left': left,
                 'joints_right': right,
                 'max_joint_jump_rad': 0.35,
+                'ik_rate_hz': ik_rate,
             }
             if s('urdf_path'):
                 ik_params['urdf_path'] = s('urdf_path')
@@ -240,7 +254,7 @@ def generate_launch_description():
     from launch.actions import OpaqueFunction
     return LaunchDescription([
         mode_arg, joint_mode_arg, source_arg, params_json_arg, urdf_arg,
-        auto_enable_arg, rate_arg, enable_ik_node_arg, params_file_arg,
+        auto_enable_arg, rate_arg, ik_rate_arg, enable_ik_node_arg, params_file_arg,
         gripper_position_arg, gripper_kp_arg, gripper_kd_arg, gripper_torque_limit_arg,
         gripper_open_limit_arg,
         OpaqueFunction(function=_build),

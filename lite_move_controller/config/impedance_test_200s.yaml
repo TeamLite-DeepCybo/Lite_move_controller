@@ -9,7 +9,7 @@
 #   · 刚度：300/8  → 150/4（约 -50%，更柔顺）
 #   · 惯性：Λ 1.0/0.05 → 2.0/0.10（阻抗的阻尼推导用它，"稍大"）
 #   · 阻尼：damping_cart 留空 ⇒ D = 2ζ√(K·Λ)；ζ 0.9 → 1.3（"稍大"）
-#   · 前馈：默认开，用 /tmp 下那次辨识（static_friction_only）
+#   · 前馈：默认开，用包内保存的辨识参数（static_friction_only）
 lite_move_controller:
   ros__parameters:
     control_mode: impedance
@@ -20,7 +20,7 @@ lite_move_controller:
     params_json: "config/dynamics/identified_params.json"
     emit_dynamics_feedforward: true
     control_rate_hz: 100.0
-    ik_rate_hz: 75.0
+    ik_rate_hz: 25.0
     segment_max_ms: 120.0
     max_command_lead_rad: 0.20
     # 前馈力矩上限（逐关节，canonical 顺序）。

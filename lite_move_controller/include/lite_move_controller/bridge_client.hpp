@@ -22,8 +22,7 @@
 //   轴1 协议 protocol（mit=0 / csp=1）—— 启动期固定，运行期不可切
 //   轴2 模式 mode —— MIT 组 0 ZERO_TORQUE / 1 HOLD / 2 TRACKING
 //
-// ⚠️ **迁移守则**：`→2 TRACKING` **只能从 1 HOLD 进**。所以接管必须走
-//    `set_mode(→1)` → 校验 → `set_mode(→2)` → 校验 两步，不能一步到位。
+// 新版桥允许 MIT 组内直接切换；健康待命和运动都使用 TRACKING。
 //
 // ⚠️ 本节点是桥的**一个数据源**：`MotionCommand.source` 必须与桥的
 //    `source_names` 白名单一致，否则**所有**命令被丢弃并打
@@ -75,6 +74,7 @@ struct BridgeStatusLite
   std::uint8_t mode{255};
   std::string mode_name;
   bool controller_active{false};
+  std::uint8_t safety_level{0};
   std::string active_controller;
   std::string active_source;
   std::uint8_t arbitration_state{255};

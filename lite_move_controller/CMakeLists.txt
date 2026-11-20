@@ -167,12 +167,17 @@ add_executable(move_shape_source src/shape_source_node.cpp)
 target_link_libraries(move_shape_source lite_move_controller_core)
 ament_target_dependencies(move_shape_source rclcpp std_msgs geometry_msgs move_msgs)
 
-# --- 纯 C++ 单测（裸跑，不注册到 colcon test）--------------------------------
+# --- 纯 C++ 单测 -------------------------------------------------------------
 #
-# 这三个可执行文件**不依赖 ROS**，因此可以在任何机器上跑：
+# 三个可执行文件**不依赖 ROS**，可以裸跑：
 #     ./build/lite_move_controller/test_core
-#     ./build/lite_move_controller/test_limits_from_yaml
 # 契约测试（test_state_contract）需要 move_msgs 生成头，故走 normal target。
+#
+# ⚠️ 这些是"自己的 main + check 宏"，不是 gtest，所以不能用 ament_add_gtest；
+#    但必须**注册到 CTest**，否则 CI 的第一道门是空的（历史上它们就一直是
+#    "裸跑"：`colcon test` 完全看不到它们）。注册时把 URDF/params 的路径用
+#    ENVIRONMENT 注入 —— 否则 test_dynamics / test_ik_kdl 会打印 SKIP 并返回 0，
+#    看上去"通过"，实际上什么都没测。
 add_executable(test_core test/test_core.cpp)
 target_link_libraries(test_core PRIVATE lite_move_controller_core)
 
@@ -192,6 +197,16 @@ target_link_libraries(test_dynamics lite_move_controller_dynamics lite_ik_node::
 add_executable(dump_pin test/tools/dump_pin.cpp)
 target_link_libraries(dump_pin lite_move_controller_dynamics lite_ik_node::lite_ik_node_kinematics)
 
+if(BUILD_TESTING)
+  foreach(_t test_core test_filter_shape test_gripper)
+    add_test(NAME ${_t} COMMAND $<TARGET_FILE:${_t}>)
+  endforeach()
+  # 需要真实模型与辨识参数的两个：环境变量缺一个就会 SKIP（rc=0）
+  add_test(NAME test_dynamics COMMAND $<TARGET_FILE:test_dynamics>)
+  set_tests_properties(test_dynamics PROPERTIES ENVIRONMENT
+    "LITE_ARM_URDF=${CMAKE_CURRENT_SOURCE_DIR}/../../Lite_IK_node/config/model/lite_000_asm.urdf;LITE_PARAMS_JSON=${CMAKE_CURRENT_SOURCE_DIR}/config/dynamics/identified_params.json")
+endif()
+
 # 契约测试：把"内部枚举 == 对外 msg 常量"变成**编译期**约束
 if(TARGET move_msgs::move_msgs__rosidl_generator_cpp)
   add_executable(test_state_contract test/test_state_contract.cpp)
@@ -200,6 +215,9 @@ if(TARGET move_msgs::move_msgs__rosidl_generator_cpp)
   #    （PRIVATE），CMake 会报 "all uses must be either all-keyword or all-plain"。
   target_link_libraries(test_state_contract lite_move_controller_core)
   ament_target_dependencies(test_state_contract move_msgs)
+  if(BUILD_TESTING)
+    add_test(NAME test_state_contract COMMAND $<TARGET_FILE:test_state_contract>)
+  endif()
 endif()
 
 # ---------------------------------------------------------------------------
